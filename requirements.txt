@@ -1,0 +1,1 @@
+# Standard-library only app. This file lets Railway detect Python.

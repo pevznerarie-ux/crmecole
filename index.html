@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CRM Sinai</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="splash" class="splash" aria-hidden="true">
+      <div class="splash-sparkles">
+        <span></span><span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div class="splash-logo"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinai" /></div>
+      <p class="splash-tagline"><span id="splashTagline"></span><span class="splash-cursor">|</span></p>
+    </div>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="brand">
+          <div class="brand-logo-plate"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinai" /></div>
+          <p class="brand-motto">Chaque famille compte.<br>Chaque geste fait grandir Sinaï.</p>
+        </div>
+        <nav id="nav"></nav>
+        <div class="sidebar-card">
+          <span class="eyebrow">Profil</span>
+          <strong>Profil administrateur</strong>
+          <p>Acces lecture, modification, export, parametrage, paiements et recus fiscaux.</p>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h1 id="viewTitle">Accueil</h1>
+            <p id="viewSubtitle">CRM personnalise pour Les institutions Sinai.</p>
+          </div>
+          <div class="top-actions">
+            <button class="top-btn" title="Recherche de doublons" id="dupBtn">Doublons</button>
+            <button class="top-btn" title="Import CSV" id="importBtn">Importer</button>
+            <button class="top-btn" title="Export CSV" id="exportBtn">Exporter</button>
+            <button class="primary-btn" id="newRecordBtn">Ajouter</button>
+          </div>
+        </header>
+
+        <section id="content" class="content"></section>
+      </main>
+    </div>
+    <div id="drawer" class="drawer" aria-live="polite"></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <dialog id="recordDialog">
+      <div id="dialogContent"></div>
+    </dialog>
+
+    <script src="./import-report.js"></script>
+    <script src="./sample-contacts.js"></script>
+    <script src="./app.js"></script>
+    <script src="./splash.js"></script>
+  </body>
+</html>
