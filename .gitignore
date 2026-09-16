@@ -1,0 +1,11 @@
+# Données réelles (PII) : ne doivent jamais être versionnées ni déployées comme
+# fichiers statiques. Elles vivent uniquement dans le volume persistant Railway
+# (crm.sqlite / crm-state.json générés par server.py au runtime).
+crm-state.json
+crm.sqlite
+crm.sqlite-journal
+*.bak
+
+__pycache__/
+*.pyc
+.DS_Store

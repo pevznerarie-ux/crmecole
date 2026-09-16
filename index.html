@@ -2,8 +2,17 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CRM Sinai</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>CRM Sinaï</title>
+    <meta name="description" content="CRM interne des institutions Sinaï : contacts, dons et interactions." />
+    <meta name="theme-color" content="#3a2c22" />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" href="./assets/icon-192.png" sizes="192x192" type="image/png" />
+    <link rel="apple-touch-icon" href="./assets/icon-192.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="CRM Sinaï" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -13,32 +22,36 @@
         <span></span><span></span><span></span><span></span><span></span>
         <span></span><span></span><span></span><span></span>
       </div>
-      <div class="splash-logo"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinai" /></div>
+      <div class="splash-logo"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinaï" /></div>
       <p class="splash-tagline"><span id="splashTagline"></span><span class="splash-cursor">|</span></p>
     </div>
     <div class="app-shell">
-      <aside class="sidebar" aria-label="Primary">
+      <div class="nav-scrim" id="navScrim"></div>
+      <aside class="sidebar" id="sidebar" aria-label="Navigation principale">
         <div class="brand">
-          <div class="brand-logo-plate"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinai" /></div>
+          <div class="brand-logo-plate"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinaï" /></div>
           <p class="brand-motto">Chaque famille compte.<br>Chaque geste fait grandir Sinaï.</p>
         </div>
         <nav id="nav"></nav>
         <div class="sidebar-card">
           <span class="eyebrow">Profil</span>
           <strong>Profil administrateur</strong>
-          <p>Acces lecture, modification, export, parametrage, paiements et recus fiscaux.</p>
+          <p>Accès lecture, modification, export, paramétrage, paiements et reçus fiscaux.</p>
         </div>
       </aside>
 
       <main>
         <header class="topbar">
-          <div>
-            <h1 id="viewTitle">Accueil</h1>
-            <p id="viewSubtitle">CRM personnalise pour Les institutions Sinai.</p>
+          <div class="topbar-top">
+            <button class="icon-btn nav-toggle" id="navToggle" title="Menu" aria-label="Ouvrir le menu">☰</button>
+            <div>
+              <h1 id="viewTitle">Accueil</h1>
+              <p id="viewSubtitle">CRM personnalisé pour Les institutions Sinaï.</p>
+            </div>
           </div>
           <div class="top-actions">
             <button class="top-btn" title="Recherche de doublons" id="dupBtn">Doublons</button>
-            <button class="top-btn" title="Import CSV" id="importBtn">Importer</button>
+            <button class="top-btn" title="Import de contacts" id="importBtn">Importer</button>
             <button class="top-btn" title="Export CSV" id="exportBtn">Exporter</button>
             <button class="primary-btn" id="newRecordBtn">Ajouter</button>
           </div>
@@ -47,14 +60,16 @@
         <section id="content" class="content"></section>
       </main>
     </div>
+    <button class="fab" id="fabAdd" title="Ajouter" aria-label="Ajouter">+</button>
     <div id="drawer" class="drawer" aria-live="polite"></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="saveIndicator" class="save-indicator" aria-live="polite"></div>
 
     <dialog id="recordDialog">
       <div id="dialogContent"></div>
     </dialog>
 
-    <script src="./import-report.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="./sample-contacts.js"></script>
     <script src="./app.js"></script>
     <script src="./splash.js"></script>
