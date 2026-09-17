@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>CRM Sinaï</title>
     <meta name="description" content="CRM interne des institutions Sinaï : contacts, dons et interactions." />
-    <meta name="theme-color" content="#3a2c22" />
+    <meta name="theme-color" content="#f7f8fb" />
     <link rel="manifest" href="./manifest.json" />
     <link rel="icon" href="./assets/icon-192.png" sizes="192x192" type="image/png" />
     <link rel="apple-touch-icon" href="./assets/icon-192.png" />
@@ -33,6 +33,11 @@
           <p class="brand-motto">Chaque famille compte.<br>Chaque geste fait grandir Sinaï.</p>
         </div>
         <nav id="nav"></nav>
+        <div class="sidebar-actions">
+          <button class="top-btn" id="dupBtnMobile" type="button">Doublons</button>
+          <button class="top-btn" id="importBtnMobile" type="button">Importer</button>
+          <button class="top-btn" id="exportBtnMobile" type="button">Exporter</button>
+        </div>
         <div class="sidebar-card">
           <span class="eyebrow">Profil</span>
           <strong>Profil administrateur</strong>
@@ -60,6 +65,27 @@
         <section id="content" class="content"></section>
       </main>
     </div>
+    <nav class="bottom-nav" id="bottomNav" aria-label="Navigation mobile">
+      <button type="button" class="bnav-btn" id="bnavHome" data-bnav="home" aria-label="Accueil">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-9"/><path d="M9.5 20v-6h5v6"/></svg>
+        <span>Accueil</span>
+      </button>
+      <button type="button" class="bnav-btn" id="bnavContacts" data-bnav="contacts" aria-label="Contacts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3.4 3-5.2 5.5-5.2s4.9 1.8 5.5 5.2"/><circle cx="17" cy="9" r="2.4"/><path d="M15.8 13.4c2 .3 3.6 1.8 4.1 4.4"/></svg>
+        <span>Contacts</span>
+      </button>
+      <button type="button" class="bnav-btn bnav-menu" id="bnavMenu" aria-label="Ouvrir le menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <button type="button" class="bnav-btn" id="bnavPayments" data-bnav="payments" aria-label="Paiements">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.3"/><path d="M14.9 8.7a4 4 0 1 0 0 6.6"/><path d="M7.3 10.3h6M7.3 13.3h5"/></svg>
+        <span>Dons</span>
+      </button>
+      <button type="button" class="bnav-btn" id="bnavInteractions" data-bnav="interactions" aria-label="Interactions">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11" rx="3"/><path d="M8 15.5v3.3l4.2-3.3"/></svg>
+        <span>Suivi</span>
+      </button>
+    </nav>
     <div class="fab-scrim" id="fabScrim"></div>
     <div class="fab-menu" id="fabMenu"></div>
     <button class="fab" id="fabAdd" title="Ajouter" aria-label="Ajouter">+</button>

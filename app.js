@@ -651,10 +651,18 @@ function groupsView() {
 function interactionsView() {
   const rows = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
   return `<section class="panel">${toolbar("Rechercher dans les interactions")}<div class="toolbar thin"><div class="row-actions">${action("Ajouter une interaction", "add-interaction", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Contact / structure</th><th>Catégorie</th><th>Libellé</th><th>Type</th><th>Note</th><th>Utilisateur</th></tr></thead><tbody>${rows.map(r=>{
+    ${rows.length ? `<div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Contact / structure</th><th>Catégorie</th><th>Libellé</th><th>Type</th><th>Note</th><th>Utilisateur</th></tr></thead><tbody>${rows.map(r=>{
       const rec = recordById(r.recordId);
       return `<tr class="row-click" data-action="open-record:${r.recordId}"><td>${r.date}</td><td>${escapeHtml(rec ? rec.name : (r.target || "-"))}</td><td>${r.category||"-"}</td><td>${escapeHtml(r.label||"-")}</td><td>${r.type==="Commentaire"?tag("Commentaire","violet"):r.type}</td><td>${escapeHtml(r.note||"-")}</td><td>${r.user}</td></tr>`;
-    }).join("")}</tbody></table></div>` : emptyState("Aucune interaction enregistrée pour l'instant.", "Ajouter une interaction", "add-interaction")}
+    }).join("")}</tbody></table></div>
+    <div class="record-cards mobile-only">${rows.map(r=>{
+      const rec = recordById(r.recordId);
+      return `<button type="button" class="record-card" data-action="open-record:${r.recordId}">
+        <div class="record-card-head"><strong>${escapeHtml(rec ? rec.name : (r.target || "-"))}</strong><span>${r.date}</span></div>
+        <p>${r.type==="Commentaire" ? "Commentaire" : escapeHtml(r.category||r.type||"-")}${r.label ? " — " + escapeHtml(r.label) : ""}</p>
+        ${r.note ? `<p>${escapeHtml(r.note)}</p>` : ""}
+      </button>`;
+    }).join("")}</div>` : emptyState("Aucune interaction enregistrée pour l'instant.", "Ajouter une interaction", "add-interaction")}
   </section>`;
 }
 
@@ -674,8 +682,14 @@ function paymentTable(type = null) {
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
   return `<section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Ajouter un paiement", `add-payment:${type || "Don"}`, "primary-btn")} ${action("Générer les reçus manquants", "generate-receipts")} ${action("Exporter", "export-current")}</div></div>
     <div class="pay-tabs">${["Tous les paiements","Dons","Adhésions","Billetterie","Reçus"].map(s => `<button class="${state.section===s ? "active" : ""}" data-view="pay" data-section="${s}">${s}</button>`).join("")}</div>
-    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
-    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>` : emptyState("Aucun paiement enregistré pour l'instant.", "Ajouter un don", "add-payment:Don")}
+    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p>
+    <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
+    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}">
+      <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
+      <p>${escapeHtml(p.type)} · ${p.date} · ${escapeHtml(p.method || "-")}</p>
+      <div class="chip-list">${status(p.status)} ${status(p.receipt)}</div>
+    </button>`).join("")}${loadMore}</div>` : emptyState("Aucun paiement enregistré pour l'instant.", "Ajouter un don", "add-payment:Don")}
   </section>`;
 }
 
@@ -783,6 +797,7 @@ function render() {
   content().innerHTML = (views[state.view] || home)();
   renderDrawer();
   bind();
+  syncBottomNav();
 }
 
 /* ---------- 7. Fiche détail ------------------------------------------- */
@@ -812,7 +827,8 @@ function recordDetailBody(r) {
   if (state.tab === "Activité") {
     const feed = recordLiveInteractions(r.id);
     const importedNote = r.importedInteractionsCount ? `<p class="muted-note">+ ${r.importedInteractionsCount} interaction(s) historiques importées avant le CRM.</p>` : "";
-    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(i => `<div class="timeline-item"><strong>${i.type === "Commentaire" ? "Commentaire" : i.type}${i.label ? " — " + escapeHtml(i.label) : ""}</strong>${i.note ? `<p>${escapeHtml(i.note)}</p>` : ""}<span class="timeline-date">${i.date} · ${escapeHtml(i.user)}</span></div>`).join("")}</div>` : emptyState("Aucune interaction ou commentaire enregistré pour l'instant.")}`;
+    const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une interaction", `quick-interaction:${r.id}`, "primary-btn")}</div>`;
+    return `${addBtn}${importedNote}${feed.length ? `<div class="timeline">${feed.map(i => `<div class="timeline-item"><strong>${i.type === "Commentaire" ? "Commentaire" : i.type}${i.label ? " — " + escapeHtml(i.label) : ""}</strong>${i.note ? `<p>${escapeHtml(i.note)}</p>` : ""}<span class="timeline-date">${i.date} · ${escapeHtml(i.user)}</span></div>`).join("")}</div>` : emptyState("Aucune interaction ou commentaire enregistré pour l'instant.")}`;
   }
   if (state.tab === "Paiements") {
     const feed = recordLivePayments(r.id);
@@ -838,11 +854,32 @@ function openNav() {
   state.navOpen = true;
   document.querySelector("#sidebar")?.classList.add("open");
   document.querySelector("#navScrim")?.classList.add("show");
+  syncBottomNav();
 }
 function closeNav() {
   state.navOpen = false;
   document.querySelector("#sidebar")?.classList.remove("open");
   document.querySelector("#navScrim")?.classList.remove("show");
+  syncBottomNav();
+}
+
+// Barre de navigation mobile (bas d'écran) : 2 destinations de chaque côté du
+// bouton menu (☰), qui ouvre le même tiroir de navigation complet que sur
+// desktop. On surligne la destination active sans reconstruire le DOM (les
+// boutons sont statiques dans index.html, jamais recréés par render()).
+function bottomNavKey() {
+  if (state.view === "home") return "home";
+  if (state.view === "pay") return "payments";
+  if (state.view === "crm" && state.section === "Interactions") return "interactions";
+  if (state.view === "crm") return "contacts";
+  return "";
+}
+function syncBottomNav() {
+  const activeKey = bottomNavKey();
+  document.querySelectorAll(".bnav-btn[data-bnav]").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.bnav === activeKey);
+  });
+  document.querySelector("#bnavMenu")?.classList.toggle("active", !!state.navOpen);
 }
 
 // Menu rapide du bouton "+" flottant : accessible depuis n'importe quel écran
@@ -1388,6 +1425,19 @@ document.querySelector("#importBtn").addEventListener("click", () => handleActio
 document.querySelector("#exportBtn").addEventListener("click", () => handleAction("export-current"));
 document.querySelector("#navToggle").addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
 document.querySelector("#navScrim").addEventListener("click", closeNav);
+
+// Doublons du haut, repris dans le tiroir de menu mobile (le bandeau de
+// boutons du haut est masqué en dessous de 720px pour dégager l'écran).
+document.querySelector("#dupBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("dedupe"); });
+document.querySelector("#importBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("import-new"); });
+document.querySelector("#exportBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("export-current"); });
+
+// Barre de navigation mobile (bas d'écran).
+document.querySelector("#bnavHome")?.addEventListener("click", () => { closeNav(); navigate("home", "Accueil"); });
+document.querySelector("#bnavContacts")?.addEventListener("click", () => { closeNav(); navigate("crm", "Contacts"); });
+document.querySelector("#bnavPayments")?.addEventListener("click", () => { closeNav(); navigate("pay", "Tous les paiements"); });
+document.querySelector("#bnavInteractions")?.addEventListener("click", () => { closeNav(); navigate("crm", "Interactions"); });
+document.querySelector("#bnavMenu")?.addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   window.addEventListener("load", () => navigator.serviceWorker.register("./service-worker.js").catch(() => {}));
