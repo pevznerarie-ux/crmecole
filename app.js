@@ -27,6 +27,25 @@ function todayStr() {
 function nowIso() {
   return new Date().toISOString();
 }
+// Format ISO (AAAA-MM-JJ) attendu par <input type="date"> — todayStr() rend
+// un format français (JJ/MM/AAAA) inutilisable comme valeur d'un tel champ.
+function todayIso() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+// Convertit la date choisie dans le formulaire (AAAA-MM-JJ) vers le format
+// d'affichage français + un horodatage ISO (pour le tri chronologique),
+// afin de pouvoir saisir une interaction passée (pas seulement "aujourd'hui").
+function dateFromInput(isoDateStr) {
+  const parts = String(isoDateStr || "").split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => !n)) return { display: todayStr(), at: nowIso() };
+  const [y, m, d] = parts;
+  const now = new Date();
+  const at = new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds()).toISOString();
+  const pad = (n) => String(n).padStart(2, "0");
+  return { display: `${pad(d)}/${pad(m)}/${y}`, at };
+}
 
 // Correspondance entre les en-têtes français d'un export (Ohme / Sinaï) et
 // les champs internes d'une fiche. Utilisé par l'import réel (section 11).
@@ -374,6 +393,31 @@ function textareaField(label, name, value = "", extra = "") {
 }
 function selectField(label, name, options, value = "") {
   return `<label>${label}<select name="${name}">${options.map(o => `<option value="${escapeHtml(o)}" ${o === value ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}</select></label>`;
+}
+// Sélecteur de catégorie d'interaction avec un bouton "+" pour créer un
+// nouveau libellé (ex : Chiour) sans quitter le formulaire — en plus de la
+// gestion complète dans Paramètres > Catégories d'interaction.
+function categoryField(value) {
+  return `<div class="category-field-wrap">
+    <label>Catégorie<select name="category">${interactionCategories.map(o => `<option value="${escapeHtml(o)}" ${o === value ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}</select></label>
+    <button type="button" class="icon-btn" data-add-category-inline title="Créer une nouvelle catégorie">+</button>
+  </div>`;
+}
+function wireCategoryAdders(root) {
+  root.querySelectorAll("[data-add-category-inline]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = (window.prompt("Nom de la nouvelle catégorie (ex : Chiour)") || "").trim();
+      if (!name) return;
+      if (!interactionCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
+        interactionCategories.push(name);
+        logAudit(`Catégorie d'interaction ajoutée : ${name}.`);
+        saveCrmData();
+      }
+      root.querySelectorAll('select[name="category"]').forEach(sel => {
+        sel.innerHTML = interactionCategories.map(o => `<option value="${escapeHtml(o)}" ${o === name ? "selected" : ""}>${escapeHtml(o)}</option>`).join("");
+      });
+    });
+  });
 }
 // Sélecteur de contact/structure avec recherche live : un <select> classique
 // serait injouable avec 10 000+ fiches (rendu lent, impossible à parcourir).
@@ -978,6 +1022,7 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   dialogContent().querySelector("form").addEventListener("submit", submitForm);
   dialogContent().querySelectorAll("[data-modal-close]").forEach(btn => btn.addEventListener("click", () => d.close()));
   wirePickers(dialogContent());
+  wireCategoryAdders(dialogContent());
   dialogContent().querySelector("input, select, textarea")?.focus();
 }
 
@@ -992,12 +1037,14 @@ function openQuickForRecord(recordId, kind) {
      ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `<input type="hidden" name="recordId" value="${r.id}">
-     ${selectField("Catégorie", "category", interactionCategories, interactionCategories[0] || "Suivi")}
+     ${field("Date", "date", todayIso(), "date", "required")}
+     ${categoryField(interactionCategories[0] || "Suivi")}
      ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Appel")}
      ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
      ${textareaField("Détail (optionnel)", "note", "")}`);
   return modalShell("comment", "Commentaire sur " + r.name, "Ajouter un commentaire",
     `<input type="hidden" name="recordId" value="${r.id}">
+     ${field("Date", "date", todayIso(), "date", "required")}
      ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile sur ce contact...'")}`, "Ajouter le commentaire");
 }
 
@@ -1037,12 +1084,14 @@ function openModal(kind, options = {}) {
       `${field("Nom du groupe", "name", "", "text", "required")}${selectField("Type", "type", ["Équipe","Famille","Gouvernance","Mécénat","Événement"], "Équipe")}${field("Établissement", "establishment", "Sinaï")}`),
     interaction: () => modalShell("interaction", "Interaction", "Ajouter une interaction",
       `${pickerField("Contact / structure", "recordId", selected)}
-       ${selectField("Catégorie", "category", interactionCategories, interactionCategories[0] || "Suivi")}
+       ${field("Date", "date", todayIso(), "date", "required")}
+       ${categoryField(interactionCategories[0] || "Suivi")}
        ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Email")}
        ${field("Libellé", "label", "")}
        ${textareaField("Détail (optionnel)", "note", "")}`),
     comment: () => modalShell("comment", "Commentaire", "Ajouter un commentaire",
       `${pickerField("Contact / structure", "recordId", selected)}
+       ${field("Date", "date", todayIso(), "date", "required")}
        ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile...'")}`, "Ajouter le commentaire"),
     linkage: () => modalShell("linkage", "Liaison", "Ajouter une liaison",
       `${selectField("Entité A", "a", records.map(r => r.name), selected ? selected.name : "")}${field("Rôle A", "roleA", "Parent")}${selectField("Entité B", "b", records.map(r => r.name), (records[1]||records[0]||{}).name || "")}${field("Rôle B", "roleB", "Parent")}${field("Type de liaison", "type", "Famille")}`),
@@ -1086,7 +1135,8 @@ function submitForm(event) {
     interaction: () => {
       const rec = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.recordName);
       if (!rec) { notify("Contact introuvable"); return; }
-      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: todayStr(), at: nowIso(), target: rec.name, category: data.category || "Suivi", label: data.label, type: data.type, note: data.note, user: "Vous" });
+      const { display, at } = dateFromInput(data.date);
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: data.category || "Suivi", label: data.label, type: data.type, note: data.note, user: "Vous" });
       logAudit(`Interaction ajoutée pour ${rec.name}.`);
       state.selectedRecord = rec.id; state.tab = "Activité";
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
@@ -1094,7 +1144,8 @@ function submitForm(event) {
     comment: () => {
       const rec = recordById(data.recordId);
       if (!rec) { notify("Contact introuvable"); return; }
-      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: todayStr(), at: nowIso(), target: rec.name, category: "Suivi", label: "Commentaire", type: "Commentaire", note: data.note, user: "Vous" });
+      const { display, at } = dateFromInput(data.date);
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi", label: "Commentaire", type: "Commentaire", note: data.note, user: "Vous" });
       logAudit(`Commentaire ajouté pour ${rec.name}.`);
       state.selectedRecord = rec.id; state.tab = "Activité";
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
