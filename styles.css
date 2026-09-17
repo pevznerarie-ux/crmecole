@@ -1,23 +1,23 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&display=swap");
 
 :root {
-  --bg: #f7f1e6;
-  --surface: #fffdf8;
-  --surface-alt: #efe6d5;
-  --ink: #3a2c22;
+  --bg: #f7f3ea;
+  --surface: #fffdf9;
+  --surface-alt: #efe7d8;
+  --ink: #332720;
   --ink-soft: #5c4a3b;
-  --muted: #8a7863;
-  --line: #e6d9c2;
-  --line-strong: #d0bd9c;
-  --accent: #b0552e;
-  --accent-2: #8a3f22;
-  --accent-soft: #f3e2d3;
-  --gold: #bd9455;
+  --muted: #83725f;
+  --line: #e5d9c4;
+  --line-strong: #cdb999;
+  --accent: #9c4a29;
+  --accent-2: #7d3a20;
+  --accent-soft: #f1e0d0;
+  --gold: #b58c4c;
   --red: #ad5a48;
   --amber: #a3762a;
-  --shadow: 0 20px 46px rgba(58, 44, 34, .14);
-  --shadow-soft: 0 2px 10px rgba(58, 44, 34, .06);
-  --display: "Space Grotesk", "Inter", sans-serif;
+  --shadow: 0 20px 46px rgba(51, 39, 32, .13);
+  --shadow-soft: 0 2px 10px rgba(51, 39, 32, .06);
+  --display: "Source Serif 4", "Georgia", serif;
   font-family: "Inter", "Segoe UI", Arial, sans-serif;
 }
 
@@ -26,10 +26,10 @@ html { background: var(--bg); }
 body { margin: 0; color: var(--ink); background: var(--bg); }
 button, input, select, textarea { font: inherit; }
 h1, h2, h3, p { margin: 0; }
-h1 { font-family: var(--display); font-size: 30px; line-height: 1.1; font-weight: 600; letter-spacing: -.01em; }
-h2 { font-family: var(--display); font-size: 20px; line-height: 1.2; font-weight: 600; letter-spacing: -.005em; }
-h3 { font-size: 13px; line-height: 1.3; font-weight: 700; letter-spacing: .01em; text-transform: uppercase; color: var(--ink-soft); }
-p { color: var(--muted); line-height: 1.55; }
+h1 { font-family: var(--display); font-size: 29px; line-height: 1.18; font-weight: 600; letter-spacing: 0; }
+h2 { font-family: var(--display); font-size: 21px; line-height: 1.25; font-weight: 600; letter-spacing: 0; }
+h3 { font-size: 12px; line-height: 1.3; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-soft); }
+p { color: var(--muted); line-height: 1.6; }
 
 button {
   min-height: 38px;
@@ -68,7 +68,7 @@ button:focus-visible, input:focus, select:focus, textarea:focus {
 .brand { display: grid; gap: 12px; padding: 4px 6px 18px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
 .brand-logo-plate { padding: 4px 2px; }
 .brand-logo-plate img { display: block; width: 100%; height: auto; }
-.brand-motto { font-family: var(--display); font-size: 13.5px; line-height: 1.35; font-weight: 600; color: #f3e6d8; letter-spacing: -.005em; }
+.brand-motto { font-family: var(--display); font-size: 13.5px; line-height: 1.4; font-weight: 500; font-style: italic; color: #f3e6d8; letter-spacing: 0; }
 .brand span, .sidebar-card p { color: rgba(246, 244, 238, .48); font-size: 12px; }
 
 nav { display: grid; gap: 2px; }
@@ -136,7 +136,7 @@ main { min-width: 0; }
   gap: 22px;
   padding: 16px 36px;
   background: var(--bg);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 3px double var(--line-strong);
 }
 .topbar p { margin-top: 4px; font-size: 13.5px; }
 .topbar-top { display: flex; align-items: center; gap: 14px; }
@@ -149,7 +149,7 @@ main { min-width: 0; }
 .nav-scrim { display: none; position: fixed; inset: 0; z-index: 14; background: rgba(20, 15, 10, .45); }
 .nav-scrim.show { display: block; }
 
-.content { display: grid; gap: 18px; padding: 26px 36px 52px; }
+.content { display: grid; gap: 20px; padding: 30px 38px 56px; }
 .workspace-hero {
   min-height: 0;
   display: grid;
