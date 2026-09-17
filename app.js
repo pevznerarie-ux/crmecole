@@ -135,7 +135,7 @@ function currentCrmData() {
     savedAt: nowIso(),
     state: { selectedRecord: state.selectedRecord },
     records, payments, imports, users, groups, interactions, linkages,
-    customFields, receiptTemplates, savedViews, auditLog,
+    customFields, receiptTemplates, savedViews, auditLog, interactionCategories,
   };
 }
 
@@ -203,6 +203,10 @@ let linkages = [];
 let customFields = [
   { name: "Établissement", type: "Liste", values: "Beth Hilel, Beth Mena'hem", required: "Non", profile: "Tous" },
 ];
+// Libellés/catégories d'interaction : liste libre, modifiable depuis Paramètres
+// (renommer, ajouter, supprimer) pour coller au vocabulaire réel de l'équipe
+// (ex : "Chiour"), au lieu d'une liste figée dans le code.
+let interactionCategories = ["Collecte", "Comptabilité", "Bénévolat", "Événement", "Scolarité"];
 let receiptTemplates = [
   { name: "Don standard", entity: "Réseau Sinaï", mode: "Automatique", signature: "Direction", active: "Oui" },
 ];
@@ -222,7 +226,7 @@ const navTree = [
   ["pay", "PAIEMENTS", ["Tous les paiements", "Dons", "Adhésions", "Billetterie", "Reçus"]],
   ["imports", "IMPORTS", []],
   ["apps", "APPLIS", ["Toutes les applis"]],
-  ["settings", "PARAMÈTRES", ["Champs personnalisés", "Reçus"]],
+  ["settings", "PARAMÈTRES", ["Champs personnalisés", "Catégories d'interaction", "Reçus"]],
   ["admin", "ADMINISTRATION", ["Utilisateurs", "Journal d'activité"]],
 ];
 
@@ -370,6 +374,47 @@ function textareaField(label, name, value = "", extra = "") {
 }
 function selectField(label, name, options, value = "") {
   return `<label>${label}<select name="${name}">${options.map(o => `<option value="${escapeHtml(o)}" ${o === value ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}</select></label>`;
+}
+// Sélecteur de contact/structure avec recherche live : un <select> classique
+// serait injouable avec 10 000+ fiches (rendu lent, impossible à parcourir).
+// On affiche un champ texte + une liste filtrée, et on stocke l'id choisi dans
+// un champ caché (recordId) — c'est ce champ que lisent les handlers d'envoi.
+function pickerField(label, name, selected) {
+  const displayValue = selected ? selected.name : "";
+  const idValue = selected ? selected.id : "";
+  return `<label class="span-2 picker-wrap" data-picker="${name}">${label}
+    <input type="text" class="picker-input" data-picker-input="${name}" autocomplete="off" placeholder="Rechercher un nom, un email..." value="${escapeHtml(displayValue)}">
+    <input type="hidden" name="${name}" data-picker-value="${name}" value="${escapeHtml(idValue)}" required>
+    <div class="picker-results" data-picker-results="${name}"></div>
+  </label>`;
+}
+function wirePickers(root) {
+  root.querySelectorAll("[data-picker-input]").forEach(input => {
+    const key = input.dataset.pickerInput;
+    const hidden = root.querySelector(`[data-picker-value="${key}"]`);
+    const results = root.querySelector(`[data-picker-results="${key}"]`);
+    const showResults = (term) => {
+      const q = term.trim().toLowerCase();
+      let list = records;
+      if (q) list = records.filter(r => (r.name || "").toLowerCase().includes(q) || (r.email || "").toLowerCase().includes(q));
+      list = list.slice(0, 8);
+      results.innerHTML = list.length
+        ? list.map(r => `<button type="button" class="picker-result" data-pick="${r.id}">${escapeHtml(r.name)}<span>${r.kind}${r.email ? " · " + escapeHtml(r.email) : ""}</span></button>`).join("")
+        : `<div class="picker-empty">Aucun résultat</div>`;
+      results.classList.add("open");
+      results.querySelectorAll("[data-pick]").forEach(btn => btn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const rec = recordById(btn.dataset.pick);
+        if (!rec) return;
+        input.value = rec.name;
+        hidden.value = rec.id;
+        results.classList.remove("open");
+      }));
+    };
+    input.addEventListener("focus", () => showResults(input.value));
+    input.addEventListener("input", () => { hidden.value = ""; showResults(input.value); });
+    input.addEventListener("blur", () => setTimeout(() => results.classList.remove("open"), 120));
+  });
 }
 function emptyState(text, actionLabel, actionKey) {
   return `<div class="empty-state"><p>${escapeHtml(text)}</p>${actionKey ? action(actionLabel, actionKey, "primary-btn") : ""}</div>`;
@@ -649,9 +694,30 @@ function segmentsSummary() {
 
 function settingsView() {
   if (state.section === "Reçus") return receipts();
+  if (state.section === "Catégories d'interaction") return categoriesView();
   return `<div class="split"><section class="panel"><div class="toolbar"><h2>Champs personnalisés</h2>${action("Créer un champ", "add-field", "primary-btn")}</div>
     <div class="table-wrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Valeur(s)</th><th>Obligatoire ?</th><th>Profils</th></tr></thead><tbody>${customFields.map(r=>`<tr><td>${escapeHtml(r.name)}</td><td>${r.type}</td><td>${escapeHtml(r.values)}</td><td>${r.required}</td><td>${r.profile}</td></tr>`).join("")}</tbody></table></div></section>
-    <section class="panel pad"><span class="eyebrow">Configuration Sinaï</span><h2>Réglages</h2><div class="timeline"><button class="timeline-item" type="button" data-action="add-receipt-template"><strong>Reçus fiscaux</strong><p>Modèles, signatures, entités émettrices.</p></button></div></section></div>`;
+    <section class="panel pad"><span class="eyebrow">Configuration Sinaï</span><h2>Réglages</h2><div class="timeline">
+      <button class="timeline-item" type="button" data-action="add-receipt-template"><strong>Reçus fiscaux</strong><p>Modèles, signatures, entités émettrices.</p></button>
+      <button class="timeline-item" type="button" data-view="settings" data-section="Catégories d'interaction"><strong>Catégories d'interaction</strong><p>Ajouter, renommer ou supprimer les libellés (ex : Chiour).</p></button>
+    </div></section></div>`;
+}
+
+function categoriesView() {
+  const counts = {};
+  interactions.forEach(i => { if (i.category) counts[i.category] = (counts[i.category] || 0) + 1; });
+  return `<div class="split"><section class="panel pad">
+    <div class="toolbar clean"><div><span class="eyebrow">Paramètres</span><h2>Catégories d'interaction</h2><p>Ces libellés servent à classer les interactions (appels, chiours, visites...) et alimentent le menu déroulant "Catégorie" partout où on ajoute une interaction.</p></div></div>
+    <div class="category-manager">${interactionCategories.map((c, i) => `
+      <div class="category-row">
+        <input type="text" value="${escapeHtml(c)}" data-category-index="${i}">
+        <span class="mini-pill">${counts[c] || 0} interaction(s)</span>
+        <button type="button" class="icon-btn" data-action="delete-category:${i}" title="Supprimer">✕</button>
+      </div>`).join("")}</div>
+    ${action("Ajouter une catégorie", "add-category", "primary-btn")}
+    </section>
+    <section class="panel pad"><span class="eyebrow">Astuce</span><h2>Vision claire</h2><p>Renommer une catégorie met à jour toutes les interactions déjà enregistrées avec ce libellé. La supprimer ne touche pas l'historique : les interactions gardent leur libellé texte, seule la liste de choix change.</p></section>
+    </div>`;
 }
 
 function admin() {
@@ -666,6 +732,7 @@ function auditView() {
 
 function render() {
   rebuildIndexes();
+  closeFabMenu();
   setHeader();
   renderNav();
   const views = { home, stats, crm, pay: paymentsView, imports: importsView, apps: appsView, settings: settingsView, admin };
@@ -734,6 +801,66 @@ function closeNav() {
   document.querySelector("#navScrim")?.classList.remove("show");
 }
 
+// Menu rapide du bouton "+" flottant : accessible depuis n'importe quel écran
+// (pas seulement depuis la fiche d'un contact), pour répondre au besoin de
+// pouvoir logger une interaction "en direct, rapide" sans naviguer.
+function buildFabMenu() {
+  const menu = document.querySelector("#fabMenu");
+  if (!menu) return;
+  menu.innerHTML = `
+    <button type="button" data-fab-open="interaction">Interaction</button>
+    <button type="button" data-fab-open="payment">Don / paiement</button>
+    <button type="button" data-fab-open="comment">Commentaire</button>
+    <button type="button" data-fab-open="contact">Nouveau contact</button>
+    <button type="button" data-fab-open="structure">Nouvelle structure</button>
+  `;
+  menu.querySelectorAll("[data-fab-open]").forEach(btn => btn.addEventListener("click", () => { closeFabMenu(); openModal(btn.dataset.fabOpen); }));
+  document.querySelector("#fabScrim")?.addEventListener("click", closeFabMenu);
+}
+function openFabMenu() {
+  document.querySelector("#fabMenu")?.classList.add("open");
+  document.querySelector("#fabScrim")?.classList.add("show");
+}
+function closeFabMenu() {
+  document.querySelector("#fabMenu")?.classList.remove("open");
+  document.querySelector("#fabScrim")?.classList.remove("show");
+}
+function toggleFabMenu() {
+  if (document.querySelector("#fabMenu")?.classList.contains("open")) closeFabMenu(); else openFabMenu();
+}
+
+// Libellés/catégories d'interaction personnalisables (Paramètres > Catégories).
+function addInteractionCategory() {
+  const name = (window.prompt("Nom de la nouvelle catégorie (ex : Chiour)") || "").trim();
+  if (!name) return;
+  if (interactionCategories.some(c => c.toLowerCase() === name.toLowerCase())) { notify("Cette catégorie existe déjà"); return; }
+  interactionCategories.push(name);
+  logAudit(`Catégorie d'interaction ajoutée : ${name}.`);
+  saveCrmData();
+  render();
+}
+function renameInteractionCategory(index, newName) {
+  const name = (newName || "").trim();
+  if (!name || !interactionCategories[index]) return;
+  const oldName = interactionCategories[index];
+  if (oldName === name) return;
+  interactionCategories[index] = name;
+  interactions.forEach(i => { if (i.category === oldName) i.category = name; });
+  logAudit(`Catégorie renommée : ${oldName} → ${name}.`);
+  saveCrmData();
+}
+function deleteInteractionCategory(index) {
+  const name = interactionCategories[index];
+  if (!name) return;
+  if (interactionCategories.length <= 1) { notify("Il doit rester au moins une catégorie"); return; }
+  const used = interactions.filter(i => i.category === name).length;
+  if (used && !window.confirm(`${used} interaction(s) utilisent "${name}". La supprimer quand même ? Ces interactions garderont ce libellé en texte.`)) return;
+  interactionCategories.splice(index, 1);
+  logAudit(`Catégorie d'interaction supprimée : ${name}.`);
+  saveCrmData();
+  render();
+}
+
 function renderDrawer() {
   if (!state.drawer) { drawerEl().className = "drawer"; drawerEl().innerHTML = ""; return; }
   drawerEl().className = "drawer open";
@@ -765,6 +892,9 @@ function bind() {
   document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", () => handleAction(el.dataset.action)));
   document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.tab = "Details"; render(); }));
   document.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
+  document.querySelectorAll("[data-category-index]").forEach(el => {
+    el.addEventListener("change", () => { renameInteractionCategory(Number(el.dataset.categoryIndex), el.value); render(); });
+  });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
     state.query = e.target.value;
@@ -800,6 +930,7 @@ function handleAction(key) {
   if (key.startsWith("add-linkage:")) return openModal("linkage", { recordId: key.split(":")[1] });
   if (key.startsWith("apply-segment:")) { state.query = key.split(":")[1]; navigate("crm", "Contacts"); return; }
   if (key.startsWith("notify-app:")) return notify(`Nous vous préviendrons pour ${key.split(":")[1]} dès que la connexion sera disponible.`);
+  if (key.startsWith("delete-category:")) return deleteInteractionCategory(Number(key.split(":")[1]));
 
   const actions = {
     "add-contact": () => openModal("contact"),
@@ -808,8 +939,11 @@ function handleAction(key) {
     "add-field": () => openModal("field"),
     "add-group": () => openModal("group"),
     "add-interaction": () => openModal("interaction"),
+    "add-payment": () => openModal("payment"),
+    "add-comment": () => openModal("comment"),
     "add-linkage": () => openModal("linkage"),
     "add-receipt-template": () => openModal("receiptTemplate"),
+    "add-category": () => addInteractionCategory(),
     "import-new": () => openImportModal(),
     "export-current": () => downloadCsv(`export-${state.view}-${todayStr().replace(/\//g,"-")}.csv`, currentRows()),
     "reset-filters": () => { state.query = ""; state.recordsPage = PAGE_STEP; state.paymentsPage = PAGE_STEP; render(); },
@@ -843,6 +977,7 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   d.showModal();
   dialogContent().querySelector("form").addEventListener("submit", submitForm);
   dialogContent().querySelectorAll("[data-modal-close]").forEach(btn => btn.addEventListener("click", () => d.close()));
+  wirePickers(dialogContent());
   dialogContent().querySelector("input, select, textarea")?.focus();
 }
 
@@ -857,7 +992,7 @@ function openQuickForRecord(recordId, kind) {
      ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `<input type="hidden" name="recordId" value="${r.id}">
-     ${selectField("Catégorie", "category", ["Collecte","Comptabilité","Bénévolat","Événement","Scolarité"], "Collecte")}
+     ${selectField("Catégorie", "category", interactionCategories, interactionCategories[0] || "Suivi")}
      ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Appel")}
      ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
      ${textareaField("Détail (optionnel)", "note", "")}`);
@@ -889,7 +1024,7 @@ function openModal(kind, options = {}) {
        ${selectField("Forme juridique", "legal", ["Association","Fondation","SAS","SARL","Autre"], "Association")}
        ${field("Étiquettes", "tags", "", "text", "placeholder='Structure, Partenaire'")}`),
     payment: () => modalShell("payment", "Paiement", "Ajouter un paiement",
-      `${selectField("Payeur", "payer", records.map(r => r.name), selected ? selected.name : "")}
+      `${pickerField("Payeur", "recordId", selected)}
        ${field("Montant (€)", "amount", "", "number", "min='0' step='1' required")}
        ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], options.type || "Don")}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
@@ -901,11 +1036,14 @@ function openModal(kind, options = {}) {
     group: () => modalShell("group", "Groupe", "Créer un groupe",
       `${field("Nom du groupe", "name", "", "text", "required")}${selectField("Type", "type", ["Équipe","Famille","Gouvernance","Mécénat","Événement"], "Équipe")}${field("Établissement", "establishment", "Sinaï")}`),
     interaction: () => modalShell("interaction", "Interaction", "Ajouter une interaction",
-      `${selectField("Contact / structure", "recordName", records.map(r => r.name), selected ? selected.name : "")}
-       ${selectField("Catégorie", "category", ["Collecte","Comptabilité","Bénévolat","Événement","Scolarité"], "Collecte")}
+      `${pickerField("Contact / structure", "recordId", selected)}
+       ${selectField("Catégorie", "category", interactionCategories, interactionCategories[0] || "Suivi")}
        ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Email")}
        ${field("Libellé", "label", "")}
        ${textareaField("Détail (optionnel)", "note", "")}`),
+    comment: () => modalShell("comment", "Commentaire", "Ajouter un commentaire",
+      `${pickerField("Contact / structure", "recordId", selected)}
+       ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile...'")}`, "Ajouter le commentaire"),
     linkage: () => modalShell("linkage", "Liaison", "Ajouter une liaison",
       `${selectField("Entité A", "a", records.map(r => r.name), selected ? selected.name : "")}${field("Rôle A", "roleA", "Parent")}${selectField("Entité B", "b", records.map(r => r.name), (records[1]||records[0]||{}).name || "")}${field("Rôle B", "roleB", "Parent")}${field("Type de liaison", "type", "Famille")}`),
     receiptTemplate: () => modalShell("receiptTemplate", "Reçus fiscaux", "Ajouter un modèle de reçu",
@@ -1180,6 +1318,7 @@ async function boot() {
     receiptTemplates = Array.isArray(backup.receiptTemplates) && backup.receiptTemplates.length ? backup.receiptTemplates : receiptTemplates;
     savedViews = Array.isArray(backup.savedViews) ? backup.savedViews : savedViews;
     auditLog = Array.isArray(backup.auditLog) ? backup.auditLog : auditLog;
+    interactionCategories = Array.isArray(backup.interactionCategories) && backup.interactionCategories.length ? backup.interactionCategories : interactionCategories;
     if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
       state.selectedRecord = backup.state.selectedRecord;
     }
@@ -1190,8 +1329,9 @@ async function boot() {
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
 }
 
-document.querySelector("#newRecordBtn").addEventListener("click", () => handleAction("add-contact"));
-document.querySelector("#fabAdd").addEventListener("click", () => handleAction("add-contact"));
+document.querySelector("#newRecordBtn").addEventListener("click", toggleFabMenu);
+document.querySelector("#fabAdd").addEventListener("click", toggleFabMenu);
+buildFabMenu();
 document.querySelector("#dupBtn").addEventListener("click", () => handleAction("dedupe"));
 document.querySelector("#importBtn").addEventListener("click", () => handleAction("import-new"));
 document.querySelector("#exportBtn").addEventListener("click", () => handleAction("export-current"));
