@@ -201,6 +201,62 @@ def connect():
     return connection
 
 
+# Paires de tags dupliqués repérées dans les données réelles (import historique
+# incohérent) : la forme minoritaire est fusionnée dans la forme majoritaire,
+# une seule fois, de façon idempotente (drapeau "tagMergeV1" dans meta).
+TAG_MERGE_PAIRS = [
+    ("AEBH", "AESBH"),
+    ("AEBM", "AESBM"),
+    ("PBH", "PSBH"),
+]
+
+
+def migrate_merge_duplicate_tags(db):
+    if get_meta(db, "tagMergeV1") == "done":
+        return
+    rows = db.execute(
+        "SELECT item_id, payload FROM collection_items WHERE collection = 'records'"
+    ).fetchall()
+    if not rows:
+        # Pas encore de fiches importées : on ne marque rien comme "fait" pour
+        # que la fusion s'applique bien dès que les vraies données arrivent
+        # (évite de verrouiller le drapeau sur une base encore vide).
+        return
+    report = {"mergedRecords": [], "pairs": {f"{a}->{b}": 0 for a, b in TAG_MERGE_PAIRS}}
+    timestamp = now_iso()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except Exception:
+            continue
+        tags = payload.get("tags")
+        if not isinstance(tags, list) or not tags:
+            continue
+        changed = False
+        for minority, canonical in TAG_MERGE_PAIRS:
+            if minority in tags:
+                changed = True
+                tags = [t for t in tags if t != minority]
+                if canonical not in tags:
+                    tags.append(canonical)
+                report["pairs"][f"{minority}->{canonical}"] += 1
+        if changed:
+            payload["tags"] = tags
+            db.execute(
+                "UPDATE collection_items SET payload = ?, updated_at = ? WHERE collection = 'records' AND item_id = ?",
+                (json.dumps(payload, ensure_ascii=False), timestamp, row["item_id"]),
+            )
+            report["mergedRecords"].append(row["item_id"])
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+        ("tagMergeV1", "done"),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+        ("tagMergeV1Report", json.dumps(report, ensure_ascii=False)),
+    )
+
+
 def init_db():
     with connect() as db:
         db.execute(
@@ -236,6 +292,7 @@ def init_db():
                     write_state_to_db(db, data)
             except Exception:
                 pass
+        migrate_merge_duplicate_tags(db)
 
 
 def item_key(collection, item, position=0):
@@ -520,6 +577,13 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             with connect() as db:
                 rows = db.execute("SELECT * FROM accounts ORDER BY created_at ASC").fetchall()
             self.send_json({"items": [public_account(r) for r in rows]})
+            return
+        if path == "/api/admin/tag-merge-report":
+            if not self.require_account(admin_only=True):
+                return
+            with connect() as db:
+                raw = get_meta(db, "tagMergeV1Report")
+            self.send_json(json.loads(raw) if raw else {"mergedRecords": [], "pairs": {}})
             return
 
         # Tout le reste de l'API nécessite une session valide.

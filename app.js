@@ -519,6 +519,48 @@ function distinctScopeTags() {
   return [...set].sort((a, b) => a.localeCompare(b, "fr"));
 }
 
+// Légende des étiquettes définie par Arié (site par site) : sert uniquement à
+// afficher un libellé lisible dans l'écran de création de compte — la valeur
+// réellement stockée/filtrée reste le code brut (ex: "AESBH").
+const SCOPE_TAG_LABELS = {
+  "P": "Parents (général)",
+  "AE": "Anciens élèves (général)",
+  "PSBH": "Parents – Beth Hillel",
+  "PBH": "Parents – Beth Hillel",
+  "PSBM": "Parents – Beth Menahem",
+  "AESBH": "Anciens élèves – Beth Hillel",
+  "AEBH": "Anciens élèves – Beth Hillel",
+  "AESBM": "Anciens élèves – Beth Menahem",
+  "AEBM": "Anciens élèves – Beth Menahem",
+  "PS17": "Parents – Kitov (17e)",
+  "AES17": "Anciens élèves – Kitov (17e)",
+  "PS18": "Parents – Sinaï 18 (18e)",
+  "AES18": "Anciens élèves – Sinaï 18 (18e)",
+  "PS20": "Parents – Heikhal (20e)",
+  "AES20": "Anciens élèves – Heikhal (20e)",
+  "PS16": "Parents – Beth Zalmi (16e)",
+  "AES16": "Anciens élèves – Beth Zalmi (16e)",
+  "PGIS18": "Parents – Gan Israël 18",
+  "AEGIS18": "Anciens élèves – Gan Israël 18",
+  "PGISL": "Parents – Gan Israël Levallois",
+  "AEGISL": "Anciens élèves – Gan Israël Levallois",
+  "Cercle Rav": "Portefeuille donateurs – Rav",
+  "Cercle Arie": "Portefeuille donateurs – Arié",
+  "Corps enseignant": "Corps enseignant",
+  "Allodons": "Origine : Allodons",
+  "BilletWeb": "Origine : BilletWeb",
+  "GALA": "Gala",
+  "GALA 2024": "Gala 2024",
+  "Donateur/Donatrice": "Donateur / Donatrice",
+  "Participant(e)": "Participant(e)",
+  "KITOV": "Kitov",
+};
+
+function scopeTagLabel(tag) {
+  const friendly = SCOPE_TAG_LABELS[tag];
+  return friendly ? `${friendly} (${tag})` : tag;
+}
+
 function accountFormFields(existing) {
   const tags = distinctScopeTags();
   const scopeMode = existing ? existing.scopeMode : "all";
@@ -537,7 +579,7 @@ function accountFormFields(existing) {
         <label style="display:flex;align-items:center;gap:6px;font-weight:500;"><input type="radio" name="scopeMode" value="tags" ${scopeMode === "tags" ? "checked" : ""}> Certaines catégories seulement</label>
       </div>
       <div class="scope-tags">${tags.length
-        ? tags.map(t => `<label class="scope-tag-chip"><input type="checkbox" name="scopeTag" value="${escapeHtml(t)}" ${scopeTags.has(t) ? "checked" : ""}> ${escapeHtml(t)}</label>`).join("")
+        ? tags.map(t => `<label class="scope-tag-chip"><input type="checkbox" name="scopeTag" value="${escapeHtml(t)}" ${scopeTags.has(t) ? "checked" : ""}> ${escapeHtml(scopeTagLabel(t))}</label>`).join("")
         : "<span class='muted-note'>Aucune étiquette ou segment détecté pour l'instant dans les fiches.</span>"}</div>
     </div>`;
 }
@@ -966,7 +1008,7 @@ function admin() {
     return emptyState("La gestion des comptes est réservée aux administrateurs.");
   }
   const scopeLabel = (a) => a.scopeMode === "tags"
-    ? ((a.scopeTags || []).length ? (a.scopeTags || []).map(t => tag(t)).join(" ") : "Aucune catégorie choisie")
+    ? ((a.scopeTags || []).length ? (a.scopeTags || []).map(t => `<span class="tag" title="${escapeHtml(scopeTagLabel(t))}">${escapeHtml(t)}</span>`).join(" ") : "Aucune catégorie choisie")
     : "Tous les contacts";
   const tableView = `<div class="table-wrap desktop-only"><table><thead><tr><th>Compte</th><th>Profil</th><th>Accès aux contacts</th><th>Dernière connexion</th><th></th></tr></thead><tbody>${accounts.map(a => `<tr>
         <td class="name-cell"><strong>${escapeHtml(`${a.first || ""} ${a.last || ""}`.trim() || a.email)}</strong><span>${escapeHtml(a.email)}</span></td>
