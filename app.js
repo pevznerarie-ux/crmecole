@@ -240,7 +240,7 @@ function currentCrmData() {
     savedAt: nowIso(),
     state: { selectedRecord: state.selectedRecord },
     records, payments, imports, users, groups, interactions, linkages,
-    customFields, receiptTemplates, savedViews, auditLog, interactionCategories,
+    customFields, receiptTemplates, savedViews, auditLog, interactionCategories, tasks,
   };
 }
 
@@ -318,6 +318,10 @@ let receiptTemplates = [
 ];
 let savedViews = [];
 let auditLog = [];
+// Tâches personnelles/assignées : première brique de l'agenda demandé par
+// Arié, affichée pour l'instant en aperçu sur l'accueil (calendrier complet,
+// synchro téléphone et rappels de fêtes = phase suivante, discutée à part).
+let tasks = [];
 
 const apps = [
   ["HelloAsso", "Collecter"], ["Stripe", "Collecter"], ["GoCardless", "Collecter"], ["iRaiser", "Collecter"],
@@ -768,8 +772,8 @@ function home() {
         <span class="hp-date">${escapeHtml(todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1))}</span>
       </div>
       <header class="hp-hero">
-        ${greetName ? `<p class="hp-greeting">${greetWord}, <em>${escapeHtml(greetName)}</em></p>` : ""}
-        <h1 class="hp-title">Pilotage Sinaï</h1>
+        <p class="hp-kicker">Pilotage Sinaï</p>
+        <h1 class="hp-title">${greetName ? `${greetWord}, <em>${escapeHtml(greetName)}</em>` : "Pilotage Sinaï"}</h1>
         <p class="hp-subtitle">Contacts, familles, structures, dons et suivi des interactions, centralisés et à jour.</p>
         <div class="hp-actions">
           ${action("Nouveau contact", "add-contact", "hp-btn hp-btn-primary")}
@@ -784,6 +788,8 @@ function home() {
         ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
       </section>
 
+      ${hpTasksPanel()}
+
       <section class="hp-columns">
         ${hpCard("hp-icon-family", "Contacts et familles", [["Ajouter un contact", "add-contact"], ["Ajouter une structure", "add-structure"], ["Rechercher les doublons", "dedupe"]])}
         ${hpCard("hp-icon-coin", "Collecte", [["Ajouter un don", "add-payment:Don"], ["Ajouter une adhésion", "add-payment:Adhésion"], ["Reçus", "goto-receipts"]])}
@@ -796,6 +802,78 @@ function home() {
         <div class="hp-timeline">${recentInteractions.map(i => hpActivityItem(i)).join("")}</div>
       </section>` : ""}
     </div>`;
+}
+
+// ---- Tâches : premier aperçu "calendrier" sur l'accueil ------------------
+// Volontairement simple (pas de vue mois/jour, pas de sync téléphone/Google,
+// pas de rappels de fêtes hébraïques) : ça reste la phase agenda complète,
+// discutée à part et pas encore commencée. Ici, juste de vraies tâches
+// persistées, groupées par échéance, qu'on peut ajouter/cocher depuis l'accueil.
+function taskDueInfo(t) {
+  if (!t.dueDate) return { tone: "none", label: "" };
+  const today = todayStr();
+  if (t.dueDate < today) return { tone: "late", label: `En retard — ${formatFrDate(t.dueDate)}` };
+  if (t.dueDate === today) return { tone: "today", label: "Aujourd'hui" };
+  return { tone: "soon", label: formatFrDate(t.dueDate) };
+}
+function formatFrDate(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+}
+function hpTasksPanel() {
+  const open = tasks.filter(t => t.status !== "fait").sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
+  const shown = open.slice(0, 8);
+  const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  return `<section class="hp-tasks">
+    <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span></div>
+    <form class="hp-task-form" id="hpTaskForm">
+      <input type="text" name="title" placeholder="Ajouter une tâche…" maxlength="140" required>
+      <input type="date" name="dueDate" value="${todayStr()}">
+      <button type="submit" class="hp-task-add" title="Ajouter">+</button>
+    </form>
+    ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
+  </section>`;
+}
+function hpTaskRow(t) {
+  const due = taskDueInfo(t);
+  return `<label class="hp-task-row">
+    <input type="checkbox" data-action="toggle-task:${t.id}">
+    <span class="hp-task-title">${escapeHtml(t.title)}</span>
+    ${due.label ? `<span class="hp-task-due hp-task-due-${due.tone}">${escapeHtml(due.label)}</span>` : ""}
+    ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
+    <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+  </label>`;
+}
+function addHomeTask(title, dueDate) {
+  const clean = (title || "").trim();
+  if (!clean) return;
+  const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  tasks.unshift({
+    id: `T-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    title: clean,
+    dueDate: dueDate || "",
+    status: "à faire",
+    assignedTo: me,
+    createdBy: me,
+    createdAt: nowIso(),
+  });
+  logAudit(`Tâche ajoutée : ${clean}.`);
+  saveCrmData();
+  render();
+}
+function toggleTaskDone(id) {
+  const t = tasks.find(x => x.id === id);
+  if (!t) return;
+  t.status = t.status === "fait" ? "à faire" : "fait";
+  saveCrmData();
+  render();
+}
+function deleteHomeTask(id) {
+  tasks = tasks.filter(t => t.id !== id);
+  saveCrmData();
+  render();
 }
 
 const HP_ICONS = {
@@ -1264,6 +1342,12 @@ function bind() {
   document.querySelectorAll("[data-category-index]").forEach(el => {
     el.addEventListener("change", () => { renameInteractionCategory(Number(el.dataset.categoryIndex), el.value); render(); });
   });
+  document.querySelector("#hpTaskForm")?.addEventListener("submit", e => {
+    e.preventDefault();
+    const form = e.target;
+    const data = new FormData(form);
+    addHomeTask(data.get("title"), data.get("dueDate"));
+  });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
     state.query = e.target.value;
@@ -1302,6 +1386,8 @@ function handleAction(key) {
   if (key.startsWith("delete-category:")) return deleteInteractionCategory(Number(key.split(":")[1]));
   if (key.startsWith("edit-account:")) { const acc = accounts.find(a => a.id === key.split(":")[1]); if (acc) openModal("account", { existing: acc }); return; }
   if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
+  if (key.startsWith("toggle-task:")) return toggleTaskDone(key.split(":")[1]);
+  if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
 
   const actions = {
     "add-contact": () => openModal("contact"),
@@ -1808,6 +1894,7 @@ async function bootApp() {
     savedViews = Array.isArray(backup.savedViews) ? backup.savedViews : savedViews;
     auditLog = Array.isArray(backup.auditLog) ? backup.auditLog : auditLog;
     interactionCategories = Array.isArray(backup.interactionCategories) && backup.interactionCategories.length ? backup.interactionCategories : interactionCategories;
+    tasks = Array.isArray(backup.tasks) ? backup.tasks : tasks;
     if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
       state.selectedRecord = backup.state.selectedRecord;
     }

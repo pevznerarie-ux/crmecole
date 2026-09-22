@@ -28,6 +28,7 @@ COLLECTIONS = {
     "receiptTemplates",
     "savedViews",
     "auditLog",
+    "tasks",
 }
 
 
@@ -713,7 +714,7 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
                 data["payments"] = [p for p in (data.get("payments") or []) if p.get("recordId") in visible_ids]
                 data["interactions"] = [i for i in (data.get("interactions") or []) if i.get("recordId") in visible_ids]
                 with connect() as db:
-                    write_state_to_db(db, data, merge_collections={"records", "payments", "interactions", "auditLog"})
+                    write_state_to_db(db, data, merge_collections={"records", "payments", "interactions", "auditLog", "tasks"})
                     rebuild_state_backup(db)
             self.send_json({"ok": True, "savedAt": data.get("savedAt")})
             return

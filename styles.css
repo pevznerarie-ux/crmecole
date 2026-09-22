@@ -13,6 +13,12 @@
   --accent-2: #4338ca;
   --accent-soft: #eef2ff;
   --accent-alt: #0891b2;
+  /* Terracotta de la marque Sinaï (repris de l'accueil premium) : sert à
+     recolorer les boutons de l'app mobile (FAB, barre du bas) pour qu'ils
+     ne jurent plus avec le nouveau design de l'accueil. */
+  --brand-rust: #a8532c;
+  --brand-rust-deep: #833f21;
+  --brand-rust-soft: #f2e2d2;
   --success: #059669;
   --success-soft: #ecfdf5;
   --warn: #d97706;
@@ -502,7 +508,7 @@ textarea { min-height: 94px; resize: vertical; }
   }
   .bnav-btn:hover { background: transparent; color: var(--muted); }
   .bnav-btn svg { width: 22px; height: 22px; }
-  .bnav-btn.active { color: var(--accent); }
+  .bnav-btn.active { color: var(--brand-rust); }
   .bnav-btn:active { transform: none; }
   .bnav-menu {
     position: relative;
@@ -511,12 +517,12 @@ textarea { min-height: 94px; resize: vertical; }
     width: 52px;
     height: 52px;
     border-radius: 50%;
-    background: linear-gradient(155deg, var(--accent), var(--accent-2));
+    background: linear-gradient(155deg, var(--brand-rust), var(--brand-rust-deep));
     color: #fff;
-    box-shadow: 0 8px 18px rgba(79, 70, 229, .38);
+    box-shadow: 0 8px 18px rgba(168, 83, 44, .38);
   }
   .bnav-menu svg { width: 21px; height: 21px; }
-  .bnav-menu:hover { background: linear-gradient(155deg, var(--accent), var(--accent-2)); color: #fff; }
+  .bnav-menu:hover { background: linear-gradient(155deg, var(--brand-rust), var(--brand-rust-deep)); color: #fff; }
   .bnav-menu.active { color: #fff; }
 
   .sidebar-actions { display: grid; gap: 8px; padding: 4px 6px 14px; border-top: 1px solid var(--line); margin-top: 2px; }
@@ -574,15 +580,15 @@ textarea { min-height: 94px; resize: vertical; }
   height: 56px;
   border-radius: 50%;
   place-items: center;
-  background: linear-gradient(155deg, var(--accent), var(--accent-2));
+  background: linear-gradient(155deg, var(--brand-rust), var(--brand-rust-deep));
   color: #fff;
   border: 0;
   font-size: 26px;
   line-height: 1;
-  box-shadow: 0 10px 24px rgba(79, 70, 229, .38), var(--shadow);
+  box-shadow: 0 10px 24px rgba(168, 83, 44, .38), var(--shadow);
   transition: transform .14s ease, box-shadow .14s ease;
 }
-.fab:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(79, 70, 229, .44), var(--shadow); }
+.fab:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(168, 83, 44, .44), var(--shadow); }
 
 .fab-menu {
   position: fixed;
@@ -602,7 +608,7 @@ textarea { min-height: 94px; resize: vertical; }
   box-shadow: var(--shadow-card);
   border-color: var(--line);
 }
-.fab-menu button:hover { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-soft); }
+.fab-menu button:hover { background: var(--brand-rust-soft); color: var(--brand-rust-deep); border-color: var(--brand-rust-soft); }
 .fab-scrim { display: none; position: fixed; inset: 0; z-index: 17; background: rgba(17, 24, 39, .32); }
 .fab-scrim.show { display: block; }
 
@@ -732,10 +738,10 @@ textarea { min-height: 94px; resize: vertical; }
 .hp-topline { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
 .hp-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--hp-rust); }
 .hp-date { font-size: 12.5px; color: var(--hp-muted); font-style: italic; font-family: var(--hp-display); }
-.hp-hero { max-width: 720px; margin-bottom: 34px; }
-.hp-greeting { margin: 0 0 6px; font-size: 15px; color: var(--hp-muted); }
-.hp-greeting em { font-style: italic; font-family: var(--hp-display); font-size: 17px; color: var(--hp-rust); font-weight: 500; }
-.hp-title { font-family: var(--hp-display); font-weight: 600; font-size: clamp(32px, 5vw, 46px); line-height: 1.05; letter-spacing: -.01em; margin: 0 0 12px; color: var(--hp-ink); }
+.hp-hero { max-width: 760px; margin-bottom: 34px; }
+.hp-kicker { margin: 0 0 10px; font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--hp-rust); }
+.hp-title { font-family: var(--hp-display); font-weight: 600; font-size: clamp(40px, 6.4vw, 64px); line-height: 1.02; letter-spacing: -.015em; margin: 0 0 14px; color: var(--hp-ink); }
+.hp-title em { font-style: italic; color: var(--hp-rust); font-weight: 500; }
 .hp-subtitle { margin: 0 0 22px; font-size: 15px; line-height: 1.6; color: var(--hp-muted); max-width: 52ch; }
 .hp-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .hp-btn { border: 1px solid var(--hp-rust); border-radius: 999px; padding: 11px 22px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .15s ease; background: transparent; color: var(--hp-rust); }
@@ -750,6 +756,30 @@ textarea { min-height: 94px; resize: vertical; }
 .hp-stat-label { font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--hp-rust); }
 .hp-stat-value { font-family: var(--hp-display); font-weight: 600; font-size: clamp(22px, 2.6vw, 30px); line-height: 1.15; color: var(--hp-ink); font-variant-numeric: tabular-nums; }
 .hp-stat-note { font-size: 11.5px; color: var(--hp-muted); }
+
+.hp-tasks { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-tasks .hp-activity-head { margin-bottom: 14px; }
+.hp-tasks-count { font-size: 12px; font-weight: 600; color: var(--hp-rust); background: var(--hp-rust-soft); padding: 3px 10px; border-radius: 999px; }
+.hp-task-form { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.hp-task-form input[type="text"] { flex: 1; min-width: 0; border: 1px solid var(--hp-line); border-radius: 10px; padding: 9px 12px; font-size: 13.5px; background: var(--hp-bg); color: var(--hp-ink); }
+.hp-task-form input[type="text"]:focus { outline: none; border-color: var(--hp-rust); box-shadow: 0 0 0 3px var(--hp-rust-soft); }
+.hp-task-form input[type="date"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); }
+.hp-task-add { width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--hp-rust); color: #fff9f2; font-size: 19px; line-height: 1; cursor: pointer; display: grid; place-items: center; transition: background .15s ease; }
+.hp-task-add:hover { background: var(--hp-rust-deep); }
+.hp-task-list { display: flex; flex-direction: column; }
+.hp-task-row { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); cursor: pointer; }
+.hp-task-row:last-child { border-bottom: none; }
+.hp-task-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--hp-rust); flex: none; cursor: pointer; }
+.hp-task-title { flex: 1; min-width: 0; font-size: 13.5px; color: var(--hp-ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hp-task-due { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; flex: none; white-space: nowrap; }
+.hp-task-due-late { background: #fbe4de; color: #a13a1f; }
+.hp-task-due-today { background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
+.hp-task-due-soon { background: #eef0e8; color: #566047; }
+.hp-task-due-none { background: transparent; color: var(--hp-muted); }
+.hp-task-assignee { font-size: 11px; color: var(--hp-muted); flex: none; }
+.hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
+.hp-task-row:hover .hp-task-remove { opacity: 1; }
+.hp-task-remove:hover { color: var(--hp-rust-deep); background: var(--hp-rust-soft); }
 
 .hp-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 34px; }
 .hp-card { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -790,4 +820,8 @@ textarea { min-height: 94px; resize: vertical; }
   .hp-stat { padding: 16px; }
   .hp-stat:nth-child(2n+1) { border-left: none; }
   .hp-columns { grid-template-columns: 1fr; }
+  .hp-tasks { padding: 16px; }
+  .hp-task-form { flex-wrap: wrap; }
+  .hp-task-form input[type="text"] { flex-basis: 100%; }
+  .hp-task-due, .hp-task-assignee { display: none; }
 }
