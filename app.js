@@ -1743,6 +1743,17 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
       if (typeSelect.value === "Promesse") statusSelect.value = "En attente";
     });
   }
+  // Le bloc "versements" (payé jusqu'ici / reste à payer / ajouter un
+  // versement maintenant) ne veut rien dire tant que "Paiement échelonné"
+  // n'est pas sur "Oui" : on ne l'affiche que dans ce cas, et on le
+  // montre/cache en direct si on change ce menu sans fermer la modale.
+  const installmentSelect = dialogContent().querySelector('select[name="installmentPlan"]');
+  const installmentSection = dialogContent().querySelector('[data-installment-section]');
+  if (installmentSelect && installmentSection) {
+    const syncInstallmentSection = () => { installmentSection.style.display = installmentSelect.value === "Oui" ? "" : "none"; };
+    syncInstallmentSection();
+    installmentSelect.addEventListener("change", syncInstallmentSection);
+  }
   dialogContent().querySelector("input:not([readonly]), select, textarea")?.focus();
 }
 
@@ -1754,11 +1765,12 @@ function openQuickForRecord(recordId, kind) {
   if (!r) return notify("Fiche introuvable");
   if (kind === "payment") return modalShell("payment", "Don pour " + r.name, "Ajouter un don / paiement",
     `${contactLockedField(r)}
-     ${field("Montant (€)", "amount", "", "number", "min='0' step='1' required")}
      ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], "Don")}
+     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
+     ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
+     ${installmentFormSection(null)}
      ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
      ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}
-     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
      ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `${contactLockedField(r)}
@@ -1787,12 +1799,13 @@ function openEditPayment(id) {
   modalShell("editPayment", "Paiement", `Modifier le paiement de ${p.payer}`,
     `${r ? contactLockedField(r) : ""}
      <input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
-     ${field("Montant (€)", "amount", p.amount, "number", "min='0' step='1' required")}
      ${selectField("Type", "type", ensureOption(["Don","Promesse","Adhésion","Billetterie"], p.type), p.type)}
+     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], p.installmentPlan ? "Oui" : "Non")}
+     ${field("Montant total (€)", "amount", p.amount, "number", "min='0' step='1' required")}
+     ${installmentFormSection(p)}
      ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
      ${selectField("Statut", "status", ensureOption(["Validé","En attente"], p.status), p.status)}
      ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
-     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], p.installmentPlan ? "Oui" : "Non")}
      ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
 }
 // Un paiement "échelonné" (ex : une Promesse réglée en plusieurs fois) suit
@@ -1822,6 +1835,38 @@ function installmentBlock(p) {
     ${list.length ? `<ul class="installment-list">${list.map(v => `<li>${v.date} — ${euro(v.amount)} (${escapeHtml(v.method)})</li>`).join("")}</ul>` : `<p class="muted-note">Aucun versement enregistré pour l'instant.</p>`}
     ${action("+ Ajouter un versement", `add-installment:${p.id}`)}
   </div>`;
+}
+// Bloc affiché DANS le formulaire d'ajout/modification d'un paiement dès que
+// "Paiement échelonné" passe sur "Oui" (masqué sinon par modalShell) : on n'a
+// pas besoin de ressortir de la modale pour voir où on en est et enregistrer
+// tout de suite ce qui vient d'être payé — plus besoin de d'abord
+// "Enregistrer" puis rouvrir "+ Ajouter un versement" séparément.
+function installmentFormSection(p) {
+  const list = p ? (p.installments || []) : [];
+  const summary = p
+    ? `<p class="muted-note">Payé jusqu'à présent : <strong>${euro(paymentPaidTotal(p))}</strong> — Reste à payer : <strong>${euro(Math.max(0, paymentRemaining(p)))}</strong></p>`
+    : `<p class="muted-note">Vous pourrez enregistrer les versements suivants depuis la fiche du contact au fur et à mesure des paiements.</p>`;
+  const listHtml = list.length ? `<ul class="installment-list">${list.map(v => `<li>${v.date} — ${euro(v.amount)} (${escapeHtml(v.method)})</li>`).join("")}</ul>` : "";
+  return `<div class="form-grid span-2 installment-form-section" data-installment-section>
+    ${summary}
+    ${listHtml}
+    <p class="installment-form-label">Ajouter un versement maintenant (optionnel)</p>
+    ${field("Montant reçu (€)", "newInstallmentAmount", "", "number", "min='0' step='1'")}
+    ${selectField("Moyen de ce versement", "newInstallmentMethod", ["CB","Chèque","Virement","SEPA","Espèces"], (p && p.method) || "CB")}
+  </div>`;
+}
+// Utilisé par les handlers "payment" (création) et "editPayment" (modif) :
+// si la case "Ajouter un versement maintenant" du bloc échelonné a été
+// remplie, on l'enregistre comme un versement à part entière (même logique
+// que le bouton "+ Ajouter un versement" de la fiche), pour ne pas obliger à
+// ressortir de la modale juste pour saisir ce premier règlement.
+function applyInlineInstallment(p, data) {
+  const montant = Number(data.newInstallmentAmount || 0);
+  if (!p.installmentPlan || !montant) return;
+  if (!Array.isArray(p.installments)) p.installments = [];
+  p.installments.push({ id: nextId("VER", p.installments), date: todayStr(), amount: montant, method: data.newInstallmentMethod || p.method });
+  logAudit(`Versement de ${euro(montant)} (${data.newInstallmentMethod || p.method}) ajouté pour ${p.payer} — ${p.type}.`);
+  if (paymentRemaining(p) <= 0) p.status = "Validé";
 }
 function paymentTimelineItem(p) {
   return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
@@ -1872,11 +1917,12 @@ function openModal(kind, options = {}) {
        ${field("Étiquettes", "tags", "", "text", "placeholder='Structure, Partenaire'")}`),
     payment: () => modalShell("payment", "Paiement", "Ajouter un paiement",
       `${pickerField("Payeur", "recordId", selected)}
-       ${field("Montant (€)", "amount", "", "number", "min='0' step='1' required")}
        ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], options.type || "Don")}
+       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], options.type === "Promesse" ? "Oui" : "Non")}
+       ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
+       ${installmentFormSection(null)}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
        ${selectField("Statut", "status", ["Validé","En attente"], options.type === "Promesse" ? "En attente" : "Validé")}
-       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], options.type === "Promesse" ? "Oui" : "Non")}
        ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
     account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
@@ -1933,6 +1979,7 @@ function submitForm(event) {
       const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: data.type === "Don" ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [] };
       payments.unshift(p);
       logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
+      applyInlineInstallment(p, data);
       state.selectedRecord = payer.id; state.tab = "Paiements";
       navigate("crm", payer.kind === "Structure" ? "Structures" : "Contacts");
     },
@@ -1974,6 +2021,7 @@ function submitForm(event) {
       if (p.installmentPlan && !Array.isArray(p.installments)) p.installments = [];
       p.occasion = splitTags(data.occasion);
       logAudit(`Paiement modifié : ${p.type} de ${euro(p.amount)} pour ${p.payer} (${p.status}).`);
+      applyInlineInstallment(p, data);
       state.tab = "Paiements";
     },
     addInstallment: () => {
