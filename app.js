@@ -286,6 +286,7 @@ const state = {
   booted: false,
   recordsPage: 80,
   paymentsPage: 80,
+  showDoneTasks: false,
 };
 
 const PAGE_STEP = 80;
@@ -755,10 +756,11 @@ function toolbar(placeholder = "Rechercher un nom, un email ou une ville") {
 }
 
 function home() {
-  const contacts = records.filter(r => r.kind === "Contact").length;
-  const structures = records.filter(r => r.kind === "Structure").length;
   const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const missingEmail = records.filter(r => !r.email).length;
+  const pendingPromises = payments.filter(p => p.type === "Promesse" && p.status !== "Validé");
+  const pendingPromisesAmount = pendingPromises.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
   const now = new Date();
   const greetHour = now.getHours();
@@ -782,10 +784,10 @@ function home() {
       </header>
 
       <section class="hp-stats">
-        ${hpStat("Contacts", contacts.toLocaleString("fr-FR"), "Fiches individuelles")}
-        ${hpStat("Structures", structures.toLocaleString("fr-FR"), "Personnes morales")}
         ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
+        ${hpStat("Promesses en attente", euro(pendingPromisesAmount), pendingPromises.length ? `${pendingPromises.length} promesse(s) à encaisser` : "Aucune promesse en attente")}
         ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
+        ${hpStat("Tâches en retard", lateTasks.length.toLocaleString("fr-FR"), lateTasks.length ? "À traiter en priorité" : "Rien en retard")}
       </section>
 
       ${hpTasksPanel()}
@@ -824,8 +826,11 @@ function formatFrDate(iso) {
 }
 function hpTasksPanel() {
   const open = tasks.filter(t => t.status !== "fait").sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
+  const done = tasks.filter(t => t.status === "fait").sort((a, b) => (b.completedAt || b.createdAt || "").localeCompare(a.completedAt || a.createdAt || ""));
   const shown = open.slice(0, 8);
+  const shownDone = done.slice(0, 15);
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  const showDone = !!state.showDoneTasks;
   return `<section class="hp-tasks">
     <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span></div>
     <form class="hp-task-form" id="hpTaskForm" autocomplete="off">
@@ -839,18 +844,21 @@ function hpTasksPanel() {
       <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
     </form>
     ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
+    ${done.length ? `<button type="button" class="hp-link hp-tasks-done-toggle" data-action="toggle-done-tasks">${showDone ? "Masquer" : "Voir"} les tâches terminées (${done.length})</button>` : ""}
+    ${showDone && shownDone.length ? `<div class="hp-task-list hp-task-list-done">${shownDone.map(t => hpTaskRow(t)).join("")}</div>` : ""}
   </section>`;
 }
 function hpTaskRow(t) {
   const due = taskDueInfo(t);
   const linkedRecord = t.recordId ? recordById(t.recordId) : null;
-  return `<div class="hp-task-row">
-    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}">
+  const done = t.status === "fait";
+  return `<div class="hp-task-row${done ? " hp-task-row-done" : ""}">
+    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""}>
     <div class="hp-task-main">
       <span class="hp-task-title">${escapeHtml(t.title)}</span>
       ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
     </div>
-    <input type="date" class="hp-task-date hp-task-date-${due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
+    <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
     ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
     <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
   </div>`;
@@ -888,12 +896,12 @@ function matchRecordsForTask(query) {
   scored.sort((a, b) => a.rank - b.rank || (a.r.name || "").localeCompare(b.r.name || "", "fr"));
   return scored.slice(0, 6).map(s => s.r);
 }
-function addHomeTask(title, dueDate, recordId) {
+function buildTask(title, dueDate, recordId) {
   const clean = (title || "").trim();
-  if (!clean) return;
+  if (!clean) return null;
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
   const linked = recordId ? recordById(recordId) : null;
-  tasks.unshift({
+  return {
     id: `T-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
     title: clean,
     dueDate: dueDate || "",
@@ -901,23 +909,101 @@ function addHomeTask(title, dueDate, recordId) {
     assignedTo: me,
     createdBy: me,
     createdAt: nowIso(),
+    completedAt: null,
     recordId: linked ? linked.id : null,
-  });
-  logAudit(`Tâche ajoutée : ${clean}${linked ? ` (liée à ${linked.name})` : ""}.`);
+  };
+}
+function addHomeTask(title, dueDate, recordId) {
+  const t = buildTask(title, dueDate, recordId);
+  if (!t) return;
+  tasks.unshift(t);
+  const linked = t.recordId ? recordById(t.recordId) : null;
+  logAudit(`Tâche ajoutée : ${t.title}${linked ? ` (liée à ${linked.name})` : ""}.`);
   saveCrmData();
   render();
 }
+// Marque une tâche faite / à refaire. On garde une trace dans le journal
+// d'activité et une date d'achèvement (completedAt) pour que les tâches
+// cochées restent consultables (voir "Voir les tâches terminées") au lieu
+// de simplement disparaître.
 function toggleTaskDone(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return;
-  t.status = t.status === "fait" ? "à faire" : "fait";
+  const willBeDone = t.status !== "fait";
+  t.status = willBeDone ? "fait" : "à faire";
+  t.completedAt = willBeDone ? nowIso() : null;
+  logAudit(`Tâche ${willBeDone ? "marquée terminée" : "remise à faire"} : ${t.title}.`);
   saveCrmData();
   render();
 }
 function deleteHomeTask(id) {
-  tasks = tasks.filter(t => t.id !== id);
+  const t = tasks.find(x => x.id === id);
+  tasks = tasks.filter(x => x.id !== id);
+  if (t) logAudit(`Tâche supprimée : ${t.title}.`);
   saveCrmData();
   render();
+}
+
+// ---- Notifications de tâches sur cet appareil -----------------------------
+// Rappel local (API Notification du navigateur), avec une heure choisie par
+// la personne connectée. Réglage volontairement gardé par appareil (comme
+// l'autorisation de notification elle-même) : stocké en localStorage, pas
+// synchronisé dans /api/state. Ça fonctionne tant que le CRM a été ouvert
+// dans ce navigateur récemment (l'onglet ou l'app installée) ; ce n'est pas
+// une vraie notification "push" reçue même app totalement fermée — surtout
+// pas garanti sur iPhone/Safari, où c'est une vraie limite technique.
+const NOTIF_PREFS_KEY = "sinai-crm-notif-prefs-v1";
+function loadNotifPrefs() {
+  try {
+    if (!window.localStorage) return { enabled: false, time: "09:00", lastFired: "" };
+    const raw = window.localStorage.getItem(NOTIF_PREFS_KEY);
+    if (!raw) return { enabled: false, time: "09:00", lastFired: "" };
+    const data = JSON.parse(raw);
+    return { enabled: !!data.enabled, time: data.time || "09:00", lastFired: data.lastFired || "" };
+  } catch {
+    return { enabled: false, time: "09:00", lastFired: "" };
+  }
+}
+function saveNotifPrefs() {
+  try {
+    if (window.localStorage) window.localStorage.setItem(NOTIF_PREFS_KEY, JSON.stringify(notifPrefs));
+  } catch { /* stockage indisponible : tant pis, le réglage ne persistera pas */ }
+}
+let notifPrefs = loadNotifPrefs();
+function tasksDueForNotification() {
+  const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  return tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate <= todayIso() && (!me || !t.assignedTo || t.assignedTo === me));
+}
+function maybeFireTaskNotification() {
+  if (!notifPrefs.enabled) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const today = todayIso();
+  if (notifPrefs.lastFired === today) return;
+  const now = new Date();
+  const nowHm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  if (nowHm < (notifPrefs.time || "09:00")) return;
+  const due = tasksDueForNotification();
+  if (due.length) {
+    try {
+      const title = due.length === 1 ? "1 tâche à traiter" : `${due.length} tâches à traiter`;
+      const body = due.slice(0, 5).map(t => `• ${t.title}`).join("\n") + (due.length > 5 ? `\n… et ${due.length - 5} autre(s)` : "");
+      new Notification(title, { body, icon: "./assets/icon-192.png" });
+    } catch { /* notification indisponible sur cet appareil */ }
+  }
+  notifPrefs.lastFired = today;
+  saveNotifPrefs();
+}
+function notifSettingsPanel() {
+  const supported = typeof Notification !== "undefined";
+  const permission = supported ? Notification.permission : "unsupported";
+  return `<section class="panel pad" id="notifSettingsPanel">
+    <span class="eyebrow">Rappels</span><h2>Notifications de tâches</h2>
+    <p class="muted-note">Reçois une notification sur cet appareil pour tes tâches du jour et en retard, à l'heure choisie ci-dessous. Ça fonctionne tant que le CRM a été ouvert récemment dans ce navigateur (ou l'app installée) sur ce téléphone/ordinateur — ce n'est pas garanti si l'app reste fermée longtemps, notamment sur iPhone.</p>
+    ${!supported ? `<p class="muted-note">Ce navigateur ne prend pas en charge les notifications.</p>` : ""}
+    ${supported && permission === "denied" ? `<p class="muted-note">Les notifications sont bloquées pour ce site dans les réglages du navigateur. Autorise-les pour recevoir les rappels.</p>` : ""}
+    <label class="settings-toggle-row"><input type="checkbox" id="notifEnabledToggle" ${supported ? "" : "disabled"} ${notifPrefs.enabled ? "checked" : ""}><span>Activer les notifications de tâches sur cet appareil</span></label>
+    <div class="form-grid"><label>Heure du rappel<input type="time" id="notifTimeInput" value="${escapeHtml(notifPrefs.time)}" ${supported ? "" : "disabled"}></label></div>
+  </section>`;
 }
 
 const HP_ICONS = {
@@ -1144,10 +1230,13 @@ function settingsView() {
   if (state.section === "Catégories d'interaction") return categoriesView();
   return `<div class="split"><section class="panel"><div class="toolbar"><h2>Champs personnalisés</h2>${action("Créer un champ", "add-field", "primary-btn")}</div>
     <div class="table-wrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Valeur(s)</th><th>Obligatoire ?</th><th>Profils</th></tr></thead><tbody>${customFields.map(r=>`<tr><td>${escapeHtml(r.name)}</td><td>${r.type}</td><td>${escapeHtml(r.values)}</td><td>${r.required}</td><td>${r.profile}</td></tr>`).join("")}</tbody></table></div></section>
-    <section class="panel pad"><span class="eyebrow">Configuration Sinaï</span><h2>Réglages</h2><div class="timeline">
-      <button class="timeline-item" type="button" data-action="add-receipt-template"><strong>Reçus fiscaux</strong><p>Modèles, signatures, entités émettrices.</p></button>
-      <button class="timeline-item" type="button" data-view="settings" data-section="Catégories d'interaction"><strong>Catégories d'interaction</strong><p>Ajouter, renommer ou supprimer les libellés (ex : Chiour).</p></button>
-    </div></section></div>`;
+    <div class="stacked-panels">
+      <section class="panel pad"><span class="eyebrow">Configuration Sinaï</span><h2>Réglages</h2><div class="timeline">
+        <button class="timeline-item" type="button" data-action="add-receipt-template"><strong>Reçus fiscaux</strong><p>Modèles, signatures, entités émettrices.</p></button>
+        <button class="timeline-item" type="button" data-view="settings" data-section="Catégories d'interaction"><strong>Catégories d'interaction</strong><p>Ajouter, renommer ou supprimer les libellés (ex : Chiour).</p></button>
+      </div></section>
+      ${notifSettingsPanel()}
+    </div></div>`;
 }
 
 function categoriesView() {
@@ -1213,7 +1302,7 @@ function render() {
 /* ---------- 7. Fiche détail ------------------------------------------- */
 
 function recordDetail(r) {
-  const tabs = ["Details", "Activité", "Paiements", "Categorisation", "Relations"];
+  const tabs = ["Details", "Activité", "Tâches", "Paiements", "Categorisation", "Relations"];
   const initial = r.kind === "Structure" ? "ST" : (r.first?.[0] || r.name?.[0] || "C");
   return `<aside class="panel detail-card">
     <div class="detail-head"><div class="avatar">${escapeHtml(initial)}</div><div><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div><button class="icon-btn detail-close" type="button" data-action="close-detail" title="Fermer et voir toute la liste">✕</button></div>
@@ -1225,6 +1314,7 @@ function recordDetail(r) {
     <div class="quick-actions">
       ${action("+ Interaction", `quick-interaction:${r.id}`)}
       ${action("+ Don", `quick-payment:${r.id}`)}
+      ${action("+ Tâche", `quick-task:${r.id}`)}
       ${action("+ Commentaire", `quick-comment:${r.id}`)}
     </div>
     <div class="tabs">${tabs.map(t => `<button class="tab-btn ${state.tab === t ? "active" : ""}" data-tab="${t}">${t === "Categorisation" ? "Détails +" : t}</button>`).join("")}</div>
@@ -1239,6 +1329,13 @@ function recordDetailBody(r) {
     const importedNote = r.importedInteractionsCount ? `<p class="muted-note">+ ${r.importedInteractionsCount} interaction(s) historiques importées avant le CRM.</p>` : "";
     const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une interaction", `quick-interaction:${r.id}`, "primary-btn")}</div>`;
     return `${addBtn}${importedNote}${feed.length ? `<div class="timeline">${feed.map(i => `<div class="timeline-item"><strong>${i.type === "Commentaire" ? "Commentaire" : i.type}${i.label ? " — " + escapeHtml(i.label) : ""}</strong>${i.note ? `<p>${escapeHtml(i.note)}</p>` : ""}<span class="timeline-date">${i.date} · ${escapeHtml(i.user)}</span></div>`).join("")}</div>` : emptyState("Aucune interaction ou commentaire enregistré pour l'instant.")}`;
+  }
+  if (state.tab === "Tâches") {
+    const recTasks = tasks.filter(t => t.recordId === r.id).sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
+    const openTasks = recTasks.filter(t => t.status !== "fait");
+    const doneTasks = recTasks.filter(t => t.status === "fait");
+    const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une tâche", `quick-task:${r.id}`, "primary-btn")}</div>`;
+    return `${addBtn}${recTasks.length ? `<div class="hp-task-list">${openTasks.map(t => hpTaskRow(t)).join("")}${doneTasks.map(t => hpTaskRow(t)).join("")}</div>` : emptyState("Aucune tâche pour cette fiche pour l'instant.")}`;
   }
   if (state.tab === "Paiements") {
     const feed = recordLivePayments(r.id);
@@ -1436,6 +1533,24 @@ function bind() {
       render();
     });
   });
+  document.querySelector("#notifEnabledToggle")?.addEventListener("change", async (e) => {
+    const el = e.target;
+    if (el.checked) {
+      if (typeof Notification === "undefined") { notify("Notifications non prises en charge par ce navigateur"); el.checked = false; return; }
+      let perm = Notification.permission;
+      if (perm === "default") { try { perm = await Notification.requestPermission(); } catch { perm = "denied"; } }
+      if (perm !== "granted") { notify("Autorisation refusée dans le navigateur"); el.checked = false; render(); return; }
+    }
+    notifPrefs.enabled = el.checked;
+    if (el.checked) notifPrefs.lastFired = "";
+    saveNotifPrefs();
+    notify(notifPrefs.enabled ? "Rappels activés sur cet appareil" : "Rappels désactivés sur cet appareil");
+  });
+  document.querySelector("#notifTimeInput")?.addEventListener("change", (e) => {
+    notifPrefs.time = e.target.value || "09:00";
+    notifPrefs.lastFired = "";
+    saveNotifPrefs();
+  });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
     state.query = e.target.value;
@@ -1467,6 +1582,7 @@ function handleAction(key) {
   if (key.startsWith("quick-interaction:")) return openQuickForRecord(key.split(":")[1], "interaction");
   if (key.startsWith("quick-payment:")) return openQuickForRecord(key.split(":")[1], "payment");
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
+  if (key.startsWith("quick-task:")) return openQuickForRecord(key.split(":")[1], "task");
   if (key.startsWith("add-payment:")) return openModal("payment", { type: key.split(":")[1] || "Don" });
   if (key.startsWith("add-linkage:")) return openModal("linkage", { recordId: key.split(":")[1] });
   if (key.startsWith("apply-segment:")) { state.query = key.split(":")[1]; navigate("crm", "Contacts"); return; }
@@ -1476,6 +1592,7 @@ function handleAction(key) {
   if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
   if (key.startsWith("toggle-task:")) return toggleTaskDone(key.split(":")[1]);
   if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
+  if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
 
   const actions = {
     "add-contact": () => openModal("contact"),
@@ -1556,6 +1673,10 @@ function openQuickForRecord(recordId, kind) {
      ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Appel")}
      ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
      ${textareaField("Détail (optionnel)", "note", "")}`);
+  if (kind === "task") return modalShell("task", "Tâche pour " + r.name, "Ajouter une tâche",
+    `${contactLockedField(r)}
+     ${field("Titre de la tâche", "title", "", "text", "required placeholder='Ex : Relancer pour le renouvellement'")}
+     ${field("Échéance", "dueDate", todayIso(), "date")}`, "Ajouter la tâche");
   return modalShell("comment", "Commentaire sur " + r.name, "Ajouter un commentaire",
     `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
@@ -1666,6 +1787,14 @@ function submitForm(event) {
       logAudit(`Commentaire ajouté pour ${rec.name}.`);
       state.selectedRecord = rec.id; state.tab = "Activité";
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
+    },
+    task: () => {
+      const t = buildTask(data.title, data.dueDate, data.recordId);
+      if (!t) return;
+      tasks.unshift(t);
+      const rec = t.recordId ? recordById(t.recordId) : null;
+      logAudit(`Tâche ajoutée : ${t.title}${rec ? ` (liée à ${rec.name})` : ""}.`);
+      if (rec) state.tab = "Tâches";
     },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
     group: () => { groups.unshift({ name: data.name, contacts: 0, structures: 0, date: todayStr(), type: data.type, establishment: data.establishment }); navigate("crm", "Groupes"); },
@@ -2005,6 +2134,11 @@ async function bootApp() {
   state.booted = true;
   render();
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
+  // Rappels de tâches sur cet appareil : on vérifie tout de suite puis
+  // toutes les minutes si l'heure choisie est atteinte (voir Réglages).
+  maybeFireTaskNotification();
+  clearInterval(bootApp._notifTimer);
+  bootApp._notifTimer = setInterval(maybeFireTaskNotification, 60000);
 }
 
 document.querySelector("#newRecordBtn").addEventListener("click", toggleFabMenu);

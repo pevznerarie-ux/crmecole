@@ -15,6 +15,18 @@
   --accent-2: #833f21;
   --accent-soft: #f2e2d2;
   --accent-alt: #0891b2;
+  /* Reprise des tokens "hp-*" de l'accueil premium au niveau global : permet
+     de réutiliser les mêmes composants (ex. liste de tâches .hp-task-row)
+     ailleurs que sur la page d'accueil, comme dans l'onglet "Tâches" d'une
+     fiche contact, sans dupliquer les styles. */
+  --hp-bg: #faf6ef;
+  --hp-surface: #fffdfa;
+  --hp-rust: #a8532c;
+  --hp-rust-deep: #833f21;
+  --hp-rust-soft: #f2e2d2;
+  --hp-ink: #2a231d;
+  --hp-muted: #7d7167;
+  --hp-line: #e9decf;
   --success: #059669;
   --success-soft: #ecfdf5;
   --warn: #d97706;
@@ -545,6 +557,10 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 
 .muted-note { margin: 2px 0 12px; color: var(--muted); font-size: 12.5px; font-style: italic; }
 
+.stacked-panels { display: flex; flex-direction: column; gap: 16px; }
+.settings-toggle-row { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 500; color: var(--ink-soft); cursor: pointer; margin: 4px 0 12px; }
+.settings-toggle-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+
 .row-click { cursor: pointer; }
 .row-click:hover td { background: var(--surface-alt); }
 
@@ -798,6 +814,10 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
 .hp-task-row:hover .hp-task-remove { opacity: 1; }
 .hp-task-remove:hover { color: var(--hp-rust-deep); background: var(--hp-rust-soft); }
+.hp-task-row-done .hp-task-title { text-decoration: line-through; color: var(--hp-muted); }
+.hp-task-row-done { opacity: .75; }
+.hp-tasks-done-toggle { margin-top: 10px; }
+.hp-task-list-done { margin-top: 8px; border-top: 1px dashed var(--hp-line); padding-top: 6px; }
 
 .hp-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 34px; }
 .hp-card { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
