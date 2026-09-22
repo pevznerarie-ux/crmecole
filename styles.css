@@ -583,6 +583,8 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .row-click:hover td { background: var(--surface-alt); }
 
 .timeline-date { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.timeline-item .payment-actions { margin-top: 10px; }
+.timeline-item .payment-actions button { min-height: 30px; padding: 0 10px; font-size: 12px; }
 
 .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 15px 0; }
 .tab-actions { margin-bottom: 12px; }

@@ -518,6 +518,17 @@ function textareaField(label, name, value = "", extra = "") {
 function selectField(label, name, options, value = "") {
   return `<label>${label}<select name="${name}">${options.map(o => `<option value="${escapeHtml(o)}" ${o === value ? "selected" : ""}>${escapeHtml(o)}</option>`).join("")}</select></label>`;
 }
+// Certains paiements importés avant le CRM portent un statut ou un reçu qui
+// n'existe plus dans les listes actuelles de l'app (ex : "Chèque encaissé",
+// "Généré ailleurs"). Sans ça, ouvrir la modale de modification sur un tel
+// paiement afficherait une valeur par défaut différente dans le menu
+// déroulant et, si l'utilisateur enregistre sans y toucher, écraserait
+// silencieusement la vraie valeur d'origine par ce défaut. On ajoute donc la
+// valeur actuelle à la liste si elle n'y est pas déjà, pour qu'elle reste
+// sélectionnée et fidèlement conservée.
+function ensureOption(list, value) {
+  return value && !list.includes(value) ? [...list, value] : list;
+}
 // Sélecteur de catégorie d'interaction avec un bouton "+" pour créer un
 // nouveau libellé (ex : Chiour) sans quitter le formulaire — en plus de la
 // gestion complète dans Paramètres > Catégories d'interaction.
@@ -1386,7 +1397,10 @@ function recordDetailBody(r) {
   if (state.tab === "Paiements") {
     const feed = recordLivePayments(r.id);
     const importedNote = r.importedAmount ? `<p class="muted-note">+ ${euro(r.importedAmount)} sur ${r.importedPaymentsCount || 0} paiement(s) historiques importés avant le CRM.</p>` : "";
-    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span></div>`).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
+    // Chaque don/paiement peut être modifié (ex : passer une "Promesse" en
+    // "Validé" une fois l'argent effectivement reçu) ou supprimé, directement
+    // depuis cette liste — jusqu'ici impossible une fois le paiement ajouté.
+    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span><div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   }
   if (state.tab === "Categorisation") {
     const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
@@ -1668,6 +1682,8 @@ function handleAction(key) {
   if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
   if (key.startsWith("toggle-task:")) return toggleTaskDone(key.split(":")[1]);
   if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
+  if (key.startsWith("edit-payment:")) return openEditPayment(key.split(":")[1]);
+  if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
   if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
 
   const actions = {
@@ -1757,6 +1773,35 @@ function openQuickForRecord(recordId, kind) {
     `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
      ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile sur ce contact...'")}`, "Ajouter le commentaire");
+}
+
+// Modifier un paiement existant : jusqu'ici seul l'ajout d'un nouveau
+// paiement était possible, donc corriger une erreur ou faire passer une
+// "Promesse" en "Validé" une fois le don reçu n'avait aucune solution.
+function openEditPayment(id) {
+  const p = payments.find(item => item.id === id);
+  if (!p) return notify("Paiement introuvable");
+  const r = recordById(p.recordId);
+  modalShell("editPayment", "Paiement", `Modifier le paiement de ${p.payer}`,
+    `${r ? contactLockedField(r) : ""}
+     <input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
+     ${field("Montant (€)", "amount", p.amount, "number", "min='0' step='1' required")}
+     ${selectField("Type", "type", ensureOption(["Don","Promesse","Adhésion","Billetterie"], p.type), p.type)}
+     ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
+     ${selectField("Statut", "status", ensureOption(["Validé","En attente"], p.status), p.status)}
+     ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
+     ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
+}
+function deletePayment(id) {
+  const p = payments.find(item => item.id === id);
+  if (!p) return notify("Paiement introuvable");
+  const ok = window.confirm(`Supprimer définitivement ce paiement de ${euro(p.amount)} (${p.type}) pour ${p.payer} ?\nCette action est irréversible.`);
+  if (!ok) return;
+  payments.splice(payments.indexOf(p), 1);
+  logAudit(`Paiement supprimé : ${p.type} de ${euro(p.amount)} pour ${p.payer}.`);
+  saveCrmData();
+  render();
+  notify("Paiement supprimé");
 }
 
 function openModal(kind, options = {}) {
@@ -1871,6 +1916,18 @@ function submitForm(event) {
       const rec = t.recordId ? recordById(t.recordId) : null;
       logAudit(`Tâche ajoutée : ${t.title}${rec ? ` (liée à ${rec.name})` : ""}.`);
       if (rec) state.tab = "Tâches";
+    },
+    editPayment: () => {
+      const p = payments.find(item => item.id === data.paymentId);
+      if (!p) { notify("Paiement introuvable"); return; }
+      p.amount = Number(data.amount);
+      p.type = data.type;
+      p.method = data.method;
+      p.status = data.status;
+      p.receipt = data.receipt;
+      p.occasion = splitTags(data.occasion);
+      logAudit(`Paiement modifié : ${p.type} de ${euro(p.amount)} pour ${p.payer} (${p.status}).`);
+      state.tab = "Paiements";
     },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
     group: () => { groups.unshift({ name: data.name, contacts: 0, structures: 0, date: todayStr(), type: data.type, establishment: data.establishment }); navigate("crm", "Groupes"); },
