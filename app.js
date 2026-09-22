@@ -811,7 +811,7 @@ function home() {
 // persistées, groupées par échéance, qu'on peut ajouter/cocher depuis l'accueil.
 function taskDueInfo(t) {
   if (!t.dueDate) return { tone: "none", label: "" };
-  const today = todayStr();
+  const today = todayIso();
   if (t.dueDate < today) return { tone: "late", label: `En retard — ${formatFrDate(t.dueDate)}` };
   if (t.dueDate === today) return { tone: "today", label: "Aujourd'hui" };
   return { tone: "soon", label: formatFrDate(t.dueDate) };
@@ -830,7 +830,7 @@ function hpTasksPanel() {
     <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span></div>
     <form class="hp-task-form" id="hpTaskForm">
       <input type="text" name="title" placeholder="Ajouter une tâche…" maxlength="140" required>
-      <input type="date" name="dueDate" value="${todayStr()}">
+      <input type="date" name="dueDate" value="${todayIso()}">
       <button type="submit" class="hp-task-add" title="Ajouter">+</button>
     </form>
     ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
