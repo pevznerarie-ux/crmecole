@@ -755,39 +755,82 @@ function home() {
   const structures = records.filter(r => r.kind === "Structure").length;
   const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const missingEmail = records.filter(r => !r.email).length;
-  const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 5);
-  const greetHour = new Date().getHours();
-  const greetWord = greetHour < 18 ? "Bonjour" : "Bonsoir";
+  const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
+  const now = new Date();
+  const greetHour = now.getHours();
+  const greetWord = greetHour < 5 ? "Bonsoir" : greetHour < 12 ? "Bonjour" : greetHour < 18 ? "Bon après-midi" : "Bonsoir";
   const greetName = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  const todayLabel = now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   return `
-    ${greetName ? `<p class="home-greeting">${greetWord}, <strong>${escapeHtml(greetName)}</strong></p>` : ""}
-    <div class="workspace-hero">
-      <div>
-        <span class="eyebrow">Les institutions Sinaï</span>
-        <h2>Pilotage Sinaï</h2>
-        <p>Contacts, familles, structures, dons et suivi des interactions, centralisés et à jour.</p>
+    <div class="home-premium">
+      <div class="hp-topline">
+        <span class="hp-eyebrow">Les institutions Sinaï</span>
+        <span class="hp-date">${escapeHtml(todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1))}</span>
       </div>
-      <div class="hero-actions">
-        ${action("Nouveau contact", "add-contact", "primary-btn")}
-        ${action("Nouveau don", "add-payment:Don")}
-      </div>
-    </div>
-    <div class="metric-grid">
-      ${metric("Contacts", contacts.toLocaleString("fr-FR"), "Fiches individuelles")}
-      ${metric("Structures", structures.toLocaleString("fr-FR"), "Personnes morales")}
-      ${metric("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
-      ${metric("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
-    </div>
-    <div class="home-grid">
-      ${card("Contacts et familles", [["Ajouter un contact", "add-contact"], ["Ajouter une structure", "add-structure"], ["Rechercher les doublons", "dedupe"]])}
-      ${card("Collecte", [["Ajouter un don", "add-payment:Don"], ["Ajouter une adhésion", "add-payment:Adhésion"], ["Reçus", "goto-receipts"]])}
-      ${card("Suivi", [["Ajouter une interaction", "add-interaction"], ["Voir les interactions", "goto-interactions"], ["Voir le journal", "goto-audit"]])}
-      ${card("Import", [["Importer un fichier", "import-new"], ["Exporter la vue active", "export-current"]])}
-    </div>
-    ${recentInteractions.length ? `<section class="panel pad">
-      <div class="toolbar clean"><h2>Activité récente</h2>${action("Voir tout", "goto-interactions")}</div>
-      <div class="timeline">${recentInteractions.map(i => activityItem(i)).join("")}</div>
-    </section>` : ""}`;
+      <header class="hp-hero">
+        ${greetName ? `<p class="hp-greeting">${greetWord}, <em>${escapeHtml(greetName)}</em></p>` : ""}
+        <h1 class="hp-title">Pilotage Sinaï</h1>
+        <p class="hp-subtitle">Contacts, familles, structures, dons et suivi des interactions, centralisés et à jour.</p>
+        <div class="hp-actions">
+          ${action("Nouveau contact", "add-contact", "hp-btn hp-btn-primary")}
+          ${action("Nouveau don", "add-payment:Don", "hp-btn hp-btn-ghost")}
+        </div>
+      </header>
+
+      <section class="hp-stats">
+        ${hpStat("Contacts", contacts.toLocaleString("fr-FR"), "Fiches individuelles")}
+        ${hpStat("Structures", structures.toLocaleString("fr-FR"), "Personnes morales")}
+        ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
+        ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
+      </section>
+
+      <section class="hp-columns">
+        ${hpCard("hp-icon-family", "Contacts et familles", [["Ajouter un contact", "add-contact"], ["Ajouter une structure", "add-structure"], ["Rechercher les doublons", "dedupe"]])}
+        ${hpCard("hp-icon-coin", "Collecte", [["Ajouter un don", "add-payment:Don"], ["Ajouter une adhésion", "add-payment:Adhésion"], ["Reçus", "goto-receipts"]])}
+        ${hpCard("hp-icon-check", "Suivi", [["Ajouter une interaction", "add-interaction"], ["Voir les interactions", "goto-interactions"], ["Voir le journal", "goto-audit"]])}
+        ${hpCard("hp-icon-import", "Import", [["Importer un fichier", "import-new"], ["Exporter la vue active", "export-current"]])}
+      </section>
+
+      ${recentInteractions.length ? `<section class="hp-activity">
+        <div class="hp-activity-head"><h2>Activité récente</h2><button type="button" class="hp-link" data-action="goto-interactions">Voir tout</button></div>
+        <div class="hp-timeline">${recentInteractions.map(i => hpActivityItem(i)).join("")}</div>
+      </section>` : ""}
+    </div>`;
+}
+
+const HP_ICONS = {
+  "hp-icon-family": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="17" cy="9" r="2.2"/><path d="M15.8 13.6c1.9.3 3.4 1.8 3.9 4.2"/></svg>',
+  "hp-icon-coin": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M14.6 9.3a3.6 3.6 0 1 0 0 5.4"/><path d="M7.5 10.6h5.5M7.5 13.4h4.6"/></svg>',
+  "hp-icon-check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M8 12.2l2.4 2.4L16 9.2"/></svg>',
+  "hp-icon-import": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11 12 15.5 16.5 11"/><path d="M4.5 18.5h15"/></svg>',
+};
+
+function hpStat(label, value, note) {
+  return `<div class="hp-stat">
+    <span class="hp-stat-label">${escapeHtml(label)}</span>
+    <strong class="hp-stat-value">${value}</strong>
+    <span class="hp-stat-note">${escapeHtml(note)}</span>
+  </div>`;
+}
+
+function hpCard(icon, title, rows) {
+  return `<section class="hp-card">
+    <div class="hp-card-head">${HP_ICONS[icon] || ""}<h3>${escapeHtml(title)}</h3></div>
+    <div class="hp-card-links">${rows.map(([label, key]) => `<button type="button" class="hp-card-link" data-action="${escapeHtml(key || label)}">${escapeHtml(label)}<span class="hp-card-arrow">→</span></button>`).join("")}</div>
+  </section>`;
+}
+
+function hpActivityItem(i) {
+  const r = recordById(i.recordId);
+  const name = r ? r.name : (i.target || "Contact supprimé");
+  return `<button class="hp-timeline-item" type="button" data-action="open-record:${i.recordId}">
+    <span class="hp-timeline-dot"></span>
+    <span class="hp-timeline-body">
+      <span class="hp-timeline-top"><strong>${escapeHtml(name)}</strong><span class="hp-timeline-kind">${escapeHtml(i.type || "")}</span></span>
+      <span class="hp-timeline-label">${escapeHtml(i.label || "")}${i.note ? " — " + escapeHtml(i.note) : ""}</span>
+      <span class="hp-timeline-date">${i.date || ""}</span>
+    </span>
+  </button>`;
 }
 
 function card(title, rows) {
