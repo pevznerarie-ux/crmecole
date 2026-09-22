@@ -22,6 +22,33 @@ const AUTH_TOKEN_KEY = "sinai-crm-auth-token";
 const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:8766" : "";
 const AUDIT_LIMIT = 200;
 
+// ---- Hauteur réelle visible sur mobile (clavier compris) -------------------
+// `100dvh` ne suffit pas : par spécification CSS, les unités "dvh" tiennent
+// compte des barres du navigateur qui apparaissent/disparaissent, mais PAS du
+// clavier virtuel. La balise "interactive-widget=resizes-content" (essayée
+// avant) ne corrige ça que sur Chrome/Android : Safari sur iPhone (l'appareil
+// utilisé en pratique) l'ignore complètement, d'où le "ça s'agrandit encore"
+// qui persistait après ce premier essai. La seule API fiable multi-navigateur
+// est window.visualViewport, qui donne la vraie hauteur visible et se met à
+// jour quand le clavier s'ouvre/se ferme. On la répercute dans une variable
+// CSS (--vvh) utilisée par .app-shell, .sidebar, .drawer, la boîte de dialogue
+// et .modal, pour que ces éléments restent toujours entièrement visibles et
+// ne poussent jamais le bas d'un formulaire sous le clavier.
+(function syncVisualViewportHeight() {
+  function apply() {
+    const vv = window.visualViewport;
+    const h = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty("--vvh", `${h}px`);
+  }
+  apply();
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", apply);
+    window.visualViewport.addEventListener("scroll", apply);
+  }
+  window.addEventListener("resize", apply);
+  window.addEventListener("orientationchange", apply);
+})();
+
 function todayStr() {
   return new Date().toLocaleDateString("fr-FR");
 }
@@ -655,7 +682,7 @@ function pickerField(label, name, selected) {
   const displayValue = selected ? selected.name : "";
   const idValue = selected ? selected.id : "";
   return `<label class="span-2 picker-wrap" data-picker="${name}">${label}
-    <input type="text" class="picker-input" data-picker-input="${name}" autocomplete="off" placeholder="Rechercher un nom, un email..." value="${escapeHtml(displayValue)}">
+    <input type="text" class="picker-input" data-picker-input="${name}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Rechercher un nom, un email..." value="${escapeHtml(displayValue)}">
     <input type="hidden" name="${name}" data-picker-value="${name}" value="${escapeHtml(idValue)}" required>
     <div class="picker-results" data-picker-results="${name}"></div>
   </label>`;
@@ -683,7 +710,21 @@ function wirePickers(root) {
         results.classList.remove("open");
       }));
     };
-    input.addEventListener("focus", () => showResults(input.value));
+    // Le champ est pré-rempli avec la fiche déjà sélectionnée (pour ne pas
+    // partir d'un formulaire vide). Sans le select() ci-dessous, cliquer
+    // dedans pour chercher quelqu'un d'autre plaçait juste le curseur dans
+    // ce texte existant : les lettres tapées s'ajoutaient au nom déjà là
+    // (ex. "David DadounTf") au lieu de le remplacer — d'où l'impression
+    // que le formulaire "mettait" tout seul un autre contact. setTimeout(0) :
+    // un clic replace le curseur à l'endroit cliqué juste après l'événement,
+    // ce qui annulerait un select() appelé de façon synchrone ; on le
+    // déclenche donc juste après, une fois ce repositionnement natif fait.
+    // On écoute aussi "click" (pas seulement "focus") : le champ étant déjà
+    // focus au premier tap (modalShell le fait à l'ouverture de la modale),
+    // "focus" ne se redéclenche pas aux clics suivants, alors que "click" si.
+    const selectAllSoon = () => setTimeout(() => input.select(), 0);
+    input.addEventListener("focus", () => { selectAllSoon(); showResults(input.value); });
+    input.addEventListener("click", selectAllSoon);
     input.addEventListener("input", () => { hidden.value = ""; showResults(input.value); });
     input.addEventListener("blur", () => setTimeout(() => results.classList.remove("open"), 120));
   });
@@ -752,7 +793,7 @@ function metric(label, value, note) {
 
 function toolbar(placeholder = "Rechercher un nom, un email ou une ville") {
   return `<div class="toolbar">
-    <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="${placeholder}" />
+    <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="${placeholder}" autocapitalize="off" autocorrect="off" spellcheck="false" />
     <div class="row-actions">
       ${action("Réinitialiser", "reset-filters")}
       ${action("Actions", "open-actions")}
@@ -1093,7 +1134,7 @@ function recordsView(kind) {
         </div>
       </div>
       <div class="toolbar records-tools">
-        <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="Rechercher un nom, un email ou une ville" />
+        <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="Rechercher un nom, un email ou une ville" autocapitalize="off" autocorrect="off" spellcheck="false" />
         <div class="row-actions">${action("Contact", "add-contact", "primary-btn")} ${action("Structure", "add-structure")}${showDetail ? "" : (rows.length ? action("Voir la fiche", "open-detail") : "")}</div>
       </div>
       <div class="table-wrap desktop-only"><table class="records-table">

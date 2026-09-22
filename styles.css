@@ -74,15 +74,19 @@ button:focus-visible, input:focus, select:focus, textarea:focus {
 }
 
 /* 100vh peut "sauter" quand le clavier du téléphone s'ouvre/se ferme (le
-   clavier redimensionne la fenêtre visible) ; 100dvh suit la vraie zone
-   visible et évite que la page ait l'air de "s'agrandir" en tapant du texte.
-   La ligne en vh reste en repli pour les très vieux navigateurs. */
-.app-shell { min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: 252px minmax(0, 1fr); }
+   clavier redimensionne la fenêtre visible). 100dvh aide sur certains
+   navigateurs mais, par spécification, ne tient PAS compte du clavier
+   virtuel — seulement des barres du navigateur. --vvh (calculée en JS à
+   partir de window.visualViewport, qui lui suit vraiment le clavier sur
+   tous les navigateurs, y compris Safari/iPhone) est donc le repli le plus
+   fiable et passe en dernier pour avoir la priorité une fois disponible. */
+.app-shell { min-height: 100vh; min-height: 100dvh; min-height: var(--vvh, 100dvh); display: grid; grid-template-columns: 252px minmax(0, 1fr); }
 .sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
   height: 100dvh;
+  height: var(--vvh, 100dvh);
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -365,16 +369,21 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .import-drop { width: calc(100% - 30px); margin: 15px; padding: 17px; border-radius: var(--radius-lg); border: 1px dashed var(--line-strong); background: var(--surface-alt); text-align: left; height: auto; }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 12px 16px; border-radius: var(--radius); background: var(--ink); color: #fff; box-shadow: var(--shadow); transform: translateY(18px); opacity: 0; pointer-events: none; transition: .2s ease; font-size: 13.5px; }
 .toast.show { transform: translateY(0); opacity: 1; }
-.drawer { position: fixed; top: 0; right: 0; z-index: 15; width: min(430px, 100vw); height: 100vh; height: 100dvh; display: grid; align-content: start; gap: 12px; overflow: auto; padding: 26px; background: #fff; border-left: 1px solid var(--line); box-shadow: var(--shadow); transform: translateX(105%); transition: .22s ease; }
+.drawer { position: fixed; top: 0; right: 0; z-index: 15; width: min(430px, 100vw); height: 100vh; height: 100dvh; height: var(--vvh, 100dvh); display: grid; align-content: start; gap: 12px; overflow: auto; padding: 26px; background: #fff; border-left: 1px solid var(--line); box-shadow: var(--shadow); transform: translateX(105%); transition: .22s ease; }
 .drawer.open { transform: translateX(0); }
 .drawer-close { position: absolute; top: 15px; right: 15px; width: 36px; padding: 0; }
 .drawer h2 { padding-right: 42px; }
 .drawer-grid { display: grid; gap: 12px; }
 
-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
+/* La boîte <dialog> native se centre elle-même (UA stylesheet, position
+   fixed + inset 0 + margin auto) sans jamais tenir compte du clavier
+   virtuel. Sans max-height ici, sur iPhone, la partie basse d'un long
+   formulaire (bouton "Enregistrer" compris) pouvait finir cachée sous le
+   clavier au lieu d'être accessible en scrollant DANS la boîte. */
+dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); max-height: calc(var(--vvh, 100dvh) - 32px); padding: 0; border: 0; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
 dialog.wide-dialog { width: min(1040px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(17, 24, 39, .5); }
-.modal { display: grid; gap: 14px; max-height: min(86vh, 900px); max-height: min(86dvh, 900px); overflow: auto; padding: 20px; }
+.modal { display: grid; gap: 14px; max-height: min(86vh, 900px); max-height: min(86dvh, 900px); max-height: min(calc((var(--vvh, 100dvh)) - 60px), 900px); overflow: auto; padding: 20px; }
 .modal header, .modal footer { display: flex; justify-content: space-between; gap: 10px; position: sticky; background: #fff; z-index: 2; }
 .modal header { top: -20px; padding-top: 2px; }
 .modal footer { bottom: -20px; padding: 12px 0 0; border-top: 1px solid var(--line); }
@@ -460,6 +469,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
     left: 0;
     height: 100vh;
     height: 100dvh;
+    height: var(--vvh, 100dvh);
     width: min(288px, 84vw);
     z-index: 16;
     transform: translateX(-105%);
