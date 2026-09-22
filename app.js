@@ -1400,7 +1400,7 @@ function recordDetailBody(r) {
     // Chaque don/paiement peut être modifié (ex : passer une "Promesse" en
     // "Validé" une fois l'argent effectivement reçu) ou supprimé, directement
     // depuis cette liste — jusqu'ici impossible une fois le paiement ajouté.
-    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span><div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
+    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   }
   if (state.tab === "Categorisation") {
     const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
@@ -1684,6 +1684,7 @@ function handleAction(key) {
   if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
   if (key.startsWith("edit-payment:")) return openEditPayment(key.split(":")[1]);
   if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
+  if (key.startsWith("add-installment:")) return openAddInstallment(key.split(":")[1]);
   if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
 
   const actions = {
@@ -1757,6 +1758,7 @@ function openQuickForRecord(recordId, kind) {
      ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], "Don")}
      ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
      ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}
+     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
      ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `${contactLockedField(r)}
@@ -1790,7 +1792,49 @@ function openEditPayment(id) {
      ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
      ${selectField("Statut", "status", ensureOption(["Validé","En attente"], p.status), p.status)}
      ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
+     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], p.installmentPlan ? "Oui" : "Non")}
      ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
+}
+// Un paiement "échelonné" (ex : une Promesse réglée en plusieurs fois) suit
+// ses versements séparément du montant total dû, pour calculer
+// automatiquement ce qu'il reste à payer sans jamais modifier le montant
+// d'origine de la promesse.
+function paymentPaidTotal(p) {
+  return (p.installments || []).reduce((sum, v) => sum + Number(v.amount || 0), 0);
+}
+function paymentRemaining(p) {
+  return Number(p.amount || 0) - paymentPaidTotal(p);
+}
+// Bloc "versements" affiché sous un paiement marqué "échelonné" : le total
+// déjà payé et le moyen utilisé pour chaque versement, le reste à payer
+// calculé automatiquement, et un bouton "+" pour enregistrer le prochain
+// versement dès qu'il arrive.
+function installmentBlock(p) {
+  if (!p.installmentPlan) return "";
+  const list = p.installments || [];
+  const remaining = paymentRemaining(p);
+  const paidTotal = paymentPaidTotal(p);
+  return `<div class="installment-block">
+    <div class="installment-summary">
+      <span>Payé : <strong>${euro(paidTotal)}</strong></span>
+      <span>${remaining > 0 ? `Reste à payer : <strong>${euro(remaining)}</strong>` : `<strong class="status ok">Entièrement payé</strong>${remaining < 0 ? ` (+ ${euro(-remaining)} versé en trop)` : ""}`}</span>
+    </div>
+    ${list.length ? `<ul class="installment-list">${list.map(v => `<li>${v.date} — ${euro(v.amount)} (${escapeHtml(v.method)})</li>`).join("")}</ul>` : `<p class="muted-note">Aucun versement enregistré pour l'instant.</p>`}
+    ${action("+ Ajouter un versement", `add-installment:${p.id}`)}
+  </div>`;
+}
+function paymentTimelineItem(p) {
+  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
+}
+function openAddInstallment(id) {
+  const p = payments.find(item => item.id === id);
+  if (!p) return notify("Paiement introuvable");
+  modalShell("addInstallment", "Versement", `Ajouter un versement — ${p.payer}`,
+    `<input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
+     <p class="muted-note">Reste à payer avant ce versement : ${euro(paymentRemaining(p))}</p>
+     ${field("Montant reçu (€)", "amount", "", "number", "min='0' step='1' required")}
+     ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], p.method || "CB")}
+     ${field("Date", "date", todayIso(), "date", "required")}`, "Ajouter le versement");
 }
 function deletePayment(id) {
   const p = payments.find(item => item.id === id);
@@ -1832,6 +1876,7 @@ function openModal(kind, options = {}) {
        ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], options.type || "Don")}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
        ${selectField("Statut", "status", ["Validé","En attente"], options.type === "Promesse" ? "En attente" : "Validé")}
+       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], options.type === "Promesse" ? "Oui" : "Non")}
        ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
     account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
@@ -1885,7 +1930,7 @@ function submitForm(event) {
     payment: () => {
       const payer = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.payer);
       if (!payer) { notify("Payeur introuvable"); return; }
-      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: data.type === "Don" ? "À générer" : "Non éligible" };
+      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: data.type === "Don" ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [] };
       payments.unshift(p);
       logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
       state.selectedRecord = payer.id; state.tab = "Paiements";
@@ -1925,8 +1970,24 @@ function submitForm(event) {
       p.method = data.method;
       p.status = data.status;
       p.receipt = data.receipt;
+      if ("installmentPlan" in data) p.installmentPlan = data.installmentPlan === "Oui";
+      if (p.installmentPlan && !Array.isArray(p.installments)) p.installments = [];
       p.occasion = splitTags(data.occasion);
       logAudit(`Paiement modifié : ${p.type} de ${euro(p.amount)} pour ${p.payer} (${p.status}).`);
+      state.tab = "Paiements";
+    },
+    addInstallment: () => {
+      const p = payments.find(item => item.id === data.paymentId);
+      if (!p) { notify("Paiement introuvable"); return; }
+      if (!Array.isArray(p.installments)) p.installments = [];
+      const { display } = dateFromInput(data.date);
+      const montant = Number(data.amount);
+      p.installments.push({ id: nextId("VER", p.installments), date: display, amount: montant, method: data.method });
+      logAudit(`Versement de ${euro(montant)} (${data.method}) ajouté pour ${p.payer} — ${p.type}.`);
+      // Une fois le montant total couvert par les versements, on considère
+      // le paiement réglé : ça évite d'avoir à repasser manuellement le
+      // statut en "Validé" en plus d'avoir ajouté le dernier versement.
+      if (paymentRemaining(p) <= 0) p.status = "Validé";
       state.tab = "Paiements";
     },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
