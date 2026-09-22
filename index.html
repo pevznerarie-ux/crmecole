@@ -25,6 +25,7 @@
       <div class="splash-logo"><img src="./assets/logo-sinai.png" alt="Les Institutions Sinaï" /></div>
       <p class="splash-tagline"><span id="splashTagline"></span><span class="splash-cursor">|</span></p>
     </div>
+    <div id="authScreen" class="auth-screen"></div>
     <div class="app-shell">
       <div class="nav-scrim" id="navScrim"></div>
       <aside class="sidebar" id="sidebar" aria-label="Navigation principale">
@@ -38,11 +39,12 @@
           <button class="top-btn" id="importBtnMobile" type="button">Importer</button>
           <button class="top-btn" id="exportBtnMobile" type="button">Exporter</button>
         </div>
-        <div class="sidebar-card">
+        <div class="sidebar-card" id="profileCard">
           <span class="eyebrow">Profil</span>
           <strong>Profil administrateur</strong>
           <p>Accès lecture, modification, export, paramétrage, paiements et reçus fiscaux.</p>
         </div>
+        <button type="button" class="logout-btn" id="logoutBtn">Se déconnecter</button>
       </aside>
 
       <main>

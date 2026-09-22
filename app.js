@@ -18,6 +18,7 @@
 /* ---------- 1. Constantes & mapping ------------------------------------ */
 
 const STORAGE_KEY = "sinai-crm-local-state-v2";
+const AUTH_TOKEN_KEY = "sinai-crm-auth-token";
 const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:8766" : "";
 const AUDIT_LIMIT = 200;
 
@@ -108,9 +109,94 @@ function normalizeHeader(header) {
 let saveInFlight = false;
 let savePending = false;
 
+// Authentification réelle : un jeton de session (renvoyé par /api/auth/login
+// ou /api/auth/setup) est envoyé sur chaque appel API dans l'en-tête
+// Authorization. Le serveur vérifie ce jeton et n'applique jamais les
+// permissions côté client seul — voir server.py.
+let authToken = null;
+let currentAccount = null;
+let accounts = [];
+
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  return headers;
+}
+
+async function apiAuthStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/status`);
+    return res.ok ? res.json() : { setupRequired: false };
+  } catch {
+    return { setupRequired: false };
+  }
+}
+async function apiSetupAdmin(payload) {
+  const res = await fetch(`${API_BASE}/api/auth/setup`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Impossible de créer le compte.");
+  return data;
+}
+async function apiLogin(payload) {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Connexion impossible.");
+  return data;
+}
+async function apiLogout() {
+  try { await fetch(`${API_BASE}/api/auth/logout`, { method: "POST", headers: authHeaders() }); } catch { /* tant pis */ }
+}
+async function apiMe() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, { headers: authHeaders() });
+    return res.ok ? res.json() : null;
+  } catch {
+    return null;
+  }
+}
+async function apiListAccounts() {
+  const res = await fetch(`${API_BASE}/api/accounts`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Accès refusé.");
+  const data = await res.json();
+  return data.items || [];
+}
+async function apiCreateAccount(payload) {
+  const res = await fetch(`${API_BASE}/api/accounts`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Création impossible.");
+  return data;
+}
+async function apiUpdateAccount(id, payload) {
+  const res = await fetch(`${API_BASE}/api/accounts/${encodeURIComponent(id)}`, {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Mise à jour impossible.");
+  return data;
+}
+async function apiDeleteAccount(id) {
+  const res = await fetch(`${API_BASE}/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE", headers: authHeaders() });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Suppression impossible.");
+  return data;
+}
+
+function currentUserLabel() {
+  if (!currentAccount) return "Vous";
+  const name = `${currentAccount.first || ""} ${currentAccount.last || ""}`.trim();
+  return name || currentAccount.email || "Vous";
+}
+
 async function apiGetState() {
   try {
-    const res = await fetch(`${API_BASE}/api/state?ts=${Date.now()}`, { cache: "no-store" });
+    const res = await fetch(`${API_BASE}/api/state?ts=${Date.now()}`, { cache: "no-store", headers: authHeaders() });
+    if (res.status === 401) { handleUnauthorized(); return null; }
     if (!res.ok) return null;
     const data = await res.json();
     return data && data.version === 1 ? data : null;
@@ -167,9 +253,10 @@ async function saveCrmData() {
   try {
     const res = await fetch(`${API_BASE}/api/state`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
+    if (res.status === 401) { handleUnauthorized(); return; }
     setSaveIndicator(res.ok ? "Enregistré" : "Enregistré localement seulement", res.ok ? "ok" : "warn");
   } catch {
     setSaveIndicator("Hors ligne — enregistré sur cet appareil", "warn");
@@ -180,7 +267,7 @@ async function saveCrmData() {
 }
 
 function logAudit(text) {
-  auditLog.unshift({ id: `AUD-${Date.now().toString(36)}`, date: todayStr(), at: nowIso(), text, user: "Vous" });
+  auditLog.unshift({ id: `AUD-${Date.now().toString(36)}`, date: todayStr(), at: nowIso(), text, user: currentUserLabel() });
   if (auditLog.length > AUDIT_LIMIT) auditLog.length = AUDIT_LIMIT;
 }
 
@@ -419,6 +506,95 @@ function wireCategoryAdders(root) {
     });
   });
 }
+
+// Étiquettes/segments réellement présents dans les fiches — sert à construire
+// la liste de catégories cochables lors de la création d'un compte à accès
+// restreint, sans avoir à coder en dur les noms des écoles/catégories.
+function distinctScopeTags() {
+  const set = new Set();
+  records.forEach(r => {
+    (r.tags || []).forEach(t => set.add(t));
+    (r.segments || []).forEach(t => set.add(t));
+  });
+  return [...set].sort((a, b) => a.localeCompare(b, "fr"));
+}
+
+function accountFormFields(existing) {
+  const tags = distinctScopeTags();
+  const scopeMode = existing ? existing.scopeMode : "all";
+  const scopeTags = new Set(existing ? existing.scopeTags || [] : []);
+  return `
+    <input type="hidden" name="accountId" value="${existing ? escapeHtml(existing.id) : ""}">
+    ${field("Prénom", "first", existing ? existing.first || "" : "")}
+    ${field("Nom", "last", existing ? existing.last || "" : "")}
+    ${field("Email", "email", existing ? existing.email || "" : "", "email", `required placeholder='prenom@sinai.fr' ${existing ? "readonly" : ""}`)}
+    ${field(existing ? "Nouveau mot de passe" : "Mot de passe", "password", "", "password", existing ? "minlength='8' placeholder='Laisser vide pour ne pas changer'" : "required minlength='8' placeholder='8 caractères minimum'")}
+    ${selectField("Profil", "profile", ["Administrateur", "Collecte", "Comptabilité", "Lecture seule"], existing ? existing.profile : "Lecture seule")}
+    <div class="span-2">
+      <label>Accès aux contacts</label>
+      <div class="account-scope-mode">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:500;"><input type="radio" name="scopeMode" value="all" ${scopeMode === "all" ? "checked" : ""}> Tous les contacts</label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:500;"><input type="radio" name="scopeMode" value="tags" ${scopeMode === "tags" ? "checked" : ""}> Certaines catégories seulement</label>
+      </div>
+      <div class="scope-tags">${tags.length
+        ? tags.map(t => `<label class="scope-tag-chip"><input type="checkbox" name="scopeTag" value="${escapeHtml(t)}" ${scopeTags.has(t) ? "checked" : ""}> ${escapeHtml(t)}</label>`).join("")
+        : "<span class='muted-note'>Aucune étiquette ou segment détecté pour l'instant dans les fiches.</span>"}</div>
+    </div>`;
+}
+
+async function submitAccountForm(form) {
+  const fd = new FormData(form);
+  const id = fd.get("accountId");
+  const scopeMode = fd.get("scopeMode") || "all";
+  const scopeTags = scopeMode === "tags" ? fd.getAll("scopeTag") : [];
+  const payload = {
+    first: fd.get("first") || "",
+    last: fd.get("last") || "",
+    profile: fd.get("profile") || "Lecture seule",
+    scopeMode, scopeTags,
+  };
+  const password = fd.get("password");
+  if (password) payload.password = password;
+  try {
+    if (id) {
+      await apiUpdateAccount(id, payload);
+      logAudit(`Compte modifié : ${fd.get("email") || id}.`);
+      notify("Compte mis à jour");
+    } else {
+      if (!password) { notify("Mot de passe requis"); return; }
+      payload.email = fd.get("email");
+      await apiCreateAccount(payload);
+      logAudit(`Compte créé : ${payload.email}.`);
+      notify("Compte créé");
+    }
+    dialog().close();
+    await refreshAccounts();
+    render();
+  } catch (err) {
+    notify(err.message || "Erreur");
+  }
+}
+
+async function deleteAccount(id) {
+  const acc = accounts.find(a => a.id === id);
+  if (!acc) return;
+  if (!window.confirm(`Supprimer le compte de ${acc.email} ? Cette action est irréversible.`)) return;
+  try {
+    await apiDeleteAccount(id);
+    logAudit(`Compte supprimé : ${acc.email}.`);
+    notify("Compte supprimé");
+    await refreshAccounts();
+    render();
+  } catch (err) {
+    notify(err.message || "Erreur");
+  }
+}
+
+async function refreshAccounts() {
+  if (!currentAccount || currentAccount.profile !== "Administrateur") { accounts = []; return; }
+  try { accounts = await apiListAccounts(); } catch { accounts = []; }
+}
+
 // Sélecteur de contact/structure avec recherche live : un <select> classique
 // serait injouable avec 10 000+ fiches (rendu lent, impossible à parcourir).
 // On affiche un champ texte + une liste filtrée, et on stocke l'id choisi dans
@@ -495,13 +671,15 @@ function filteredPayments(type) {
 function currentRows() {
   if (state.view === "pay") return filteredPayments({ Dons: "Don", Adhésions: "Adhésion", Billetterie: "Billetterie" }[state.section]);
   if (state.view === "imports") return imports;
-  if (state.view === "admin") return users;
+  if (state.view === "admin") return accounts;
   if (state.view === "settings") return customFields;
   return filteredRecords();
 }
 
 function renderNav() {
-  nav().innerHTML = navTree.map(([id, label, children]) => `
+  const isAdmin = currentAccount && currentAccount.profile === "Administrateur";
+  const visibleTree = navTree.filter(([id]) => id !== "admin" || isAdmin);
+  nav().innerHTML = visibleTree.map(([id, label, children]) => `
     <div class="nav-group">
       <button class="nav-btn ${state.view === id ? "active" : ""}" data-view="${id}" data-section="${children[0] || label}">
         <span>${label}</span>
@@ -536,7 +714,11 @@ function home() {
   const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const missingEmail = records.filter(r => !r.email).length;
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 5);
+  const greetHour = new Date().getHours();
+  const greetWord = greetHour < 18 ? "Bonjour" : "Bonsoir";
+  const greetName = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
   return `
+    ${greetName ? `<p class="home-greeting">${greetWord}, <strong>${escapeHtml(greetName)}</strong></p>` : ""}
     <div class="workspace-hero">
       <div>
         <span class="eyebrow">Les institutions Sinaï</span>
@@ -780,8 +962,29 @@ function categoriesView() {
 
 function admin() {
   if (state.section === "Journal d'activité") return auditView();
-  return `<section class="panel"><div class="toolbar"><h2>Utilisateurs</h2>${action("Ajouter un utilisateur","add-user","primary-btn")}</div>
-    <div class="table-wrap"><table><thead><tr><th>Email</th><th>Prénom</th><th>Nom</th><th>Profil</th><th>Dernière activité</th></tr></thead><tbody>${users.map(r=>`<tr><td>${escapeHtml(r.email)}</td><td>${escapeHtml(r.first)}</td><td>${escapeHtml(r.last)}</td><td>${r.profile}</td><td>${r.lastSeen}</td></tr>`).join("")}</tbody></table></div></section>`;
+  if (!currentAccount || currentAccount.profile !== "Administrateur") {
+    return emptyState("La gestion des comptes est réservée aux administrateurs.");
+  }
+  const scopeLabel = (a) => a.scopeMode === "tags"
+    ? ((a.scopeTags || []).length ? (a.scopeTags || []).map(t => tag(t)).join(" ") : "Aucune catégorie choisie")
+    : "Tous les contacts";
+  const tableView = `<div class="table-wrap desktop-only"><table><thead><tr><th>Compte</th><th>Profil</th><th>Accès aux contacts</th><th>Dernière connexion</th><th></th></tr></thead><tbody>${accounts.map(a => `<tr>
+        <td class="name-cell"><strong>${escapeHtml(`${a.first || ""} ${a.last || ""}`.trim() || a.email)}</strong><span>${escapeHtml(a.email)}</span></td>
+        <td>${a.profile}</td>
+        <td>${scopeLabel(a)}</td>
+        <td>${a.lastLogin ? new Date(a.lastLogin).toLocaleString("fr-FR") : "Jamais connecté"}</td>
+        <td class="row-actions"><button type="button" class="icon-btn" data-action="edit-account:${a.id}" title="Modifier">✎</button>${a.id !== currentAccount.id ? `<button type="button" class="icon-btn" data-action="delete-account:${a.id}" title="Supprimer">✕</button>` : ""}</td>
+      </tr>`).join("")}</tbody></table></div>
+    <div class="record-cards mobile-only">${accounts.map(a => `<div class="record-card">
+        <div class="record-card-head"><strong>${escapeHtml(`${a.first || ""} ${a.last || ""}`.trim() || a.email)}</strong><span>${a.profile}</span></div>
+        <p>${escapeHtml(a.email)}</p>
+        <p>${scopeLabel(a)}</p>
+        <div class="row-actions"><button type="button" data-action="edit-account:${a.id}">Modifier</button>${a.id !== currentAccount.id ? `<button type="button" data-action="delete-account:${a.id}">Supprimer</button>` : ""}</div>
+      </div>`).join("")}</div>`;
+  return `<section class="panel"><div class="toolbar"><h2>Comptes</h2>${action("Ajouter un compte", "add-user", "primary-btn")}</div>
+    <p class="muted-note">Chaque personne se connecte avec son propre email et mot de passe. L'accès aux contacts peut être limité par catégorie (étiquette ou segment).</p>
+    ${accounts.length ? tableView : emptyState("Aucun compte pour l'instant.", "Ajouter un compte", "add-user")}
+  </section>`;
 }
 
 function auditView() {
@@ -1012,11 +1215,13 @@ function handleAction(key) {
   if (key.startsWith("apply-segment:")) { state.query = key.split(":")[1]; navigate("crm", "Contacts"); return; }
   if (key.startsWith("notify-app:")) return notify(`Nous vous préviendrons pour ${key.split(":")[1]} dès que la connexion sera disponible.`);
   if (key.startsWith("delete-category:")) return deleteInteractionCategory(Number(key.split(":")[1]));
+  if (key.startsWith("edit-account:")) { const acc = accounts.find(a => a.id === key.split(":")[1]); if (acc) openModal("account", { existing: acc }); return; }
+  if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
 
   const actions = {
     "add-contact": () => openModal("contact"),
     "add-structure": () => openModal("structure"),
-    "add-user": () => openModal("user"),
+    "add-user": () => openModal("account"),
     "add-field": () => openModal("field"),
     "add-group": () => openModal("group"),
     "add-interaction": () => openModal("interaction"),
@@ -1113,8 +1318,8 @@ function openModal(kind, options = {}) {
        ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], options.type || "Don")}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
        ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}`),
-    user: () => modalShell("user", "Administration", "Ajouter un utilisateur",
-      `${field("Email", "email", "", "email", "required placeholder='prenom@sinai.fr'")}${field("Prénom", "first", "")}${field("Nom", "last", "")}${selectField("Profil", "profile", ["Administrateur","Collecte","Comptabilité","Lecture seule"], "Lecture seule")}`),
+    account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
+      accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
     field: () => modalShell("field", "Paramètres", "Ajouter un champ personnalisé",
       `${field("Nom du champ", "name", "", "text", "required")}${selectField("Type", "type", ["Texte","Date","Montant","Liste","Case à cocher"], "Texte")}${field("Valeurs", "values", "Libre")}${selectField("Obligatoire", "required", ["Oui","Non"], "Non")}`),
     group: () => modalShell("group", "Groupe", "Créer un groupe",
@@ -1151,6 +1356,8 @@ function submitForm(event) {
   const required = [...form.querySelectorAll("[required]")].filter(el => !String(el.value || "").trim());
   if (required.length) { notify("Complétez les champs obligatoires"); return; }
 
+  if (kind === "account") { submitAccountForm(form); return; }
+
   const handlers = {
     contact: () => {
       const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first, last: data.last, name: `${data.first} ${data.last}`.trim(), email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, source: "Manuel", family: data.family, dateAdded: todayStr() };
@@ -1173,7 +1380,7 @@ function submitForm(event) {
       const rec = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.recordName);
       if (!rec) { notify("Contact introuvable"); return; }
       const { display, at } = dateFromInput(data.date);
-      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: data.category || "Suivi", label: data.label, type: data.type, note: data.note, user: "Vous" });
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: data.category || "Suivi", label: data.label, type: data.type, note: data.note, user: currentUserLabel() });
       logAudit(`Interaction ajoutée pour ${rec.name}.`);
       state.selectedRecord = rec.id; state.tab = "Activité";
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
@@ -1182,12 +1389,11 @@ function submitForm(event) {
       const rec = recordById(data.recordId);
       if (!rec) { notify("Contact introuvable"); return; }
       const { display, at } = dateFromInput(data.date);
-      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi", label: "Commentaire", type: "Commentaire", note: data.note, user: "Vous" });
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi", label: "Commentaire", type: "Commentaire", note: data.note, user: currentUserLabel() });
       logAudit(`Commentaire ajouté pour ${rec.name}.`);
       state.selectedRecord = rec.id; state.tab = "Activité";
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
     },
-    user: () => { users.unshift({ email: data.email, first: data.first, last: data.last, profile: data.profile, lastSeen: "Invité" }); logAudit(`Utilisateur ajouté : ${data.email}.`); navigate("admin", "Utilisateurs"); },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
     group: () => { groups.unshift({ name: data.name, contacts: 0, structures: 0, date: todayStr(), type: data.type, establishment: data.establishment }); navigate("crm", "Groupes"); },
     linkage: () => { linkages.unshift({ a: data.a, roleA: data.roleA, b: data.b, roleB: data.roleB, type: data.type }); logAudit(`Liaison ajoutée entre ${data.a} et ${data.b}.`); navigate("crm", "Liaisons"); },
@@ -1379,7 +1585,7 @@ function confirmImport() {
       records.push({ id: nextId("C", records), kind: "Contact", source: `Import ${p.fileName}`, dateAdded: todayStr(), ...mapped });
     }
   });
-  imports.unshift({ status: "Terminé", date: todayStr(), file: p.fileName, user: "Vous", type: "Contacts", rows: p.rows, errors: 0, created: p.created, updated: p.updated, duplicates: p.updated, rejected: 0 });
+  imports.unshift({ status: "Terminé", date: todayStr(), file: p.fileName, user: currentUserLabel(), type: "Contacts", rows: p.rows, errors: 0, created: p.created, updated: p.updated, duplicates: p.updated, rejected: 0 });
   logAudit(`Import de ${p.fileName} : ${p.created} créé(s), ${p.updated} mis à jour.`);
   pendingImport = null;
   dialog().close();
@@ -1390,7 +1596,117 @@ function confirmImport() {
 
 /* ---------- 12. Démarrage ------------------------------------------------ */
 
+/* ---------- 12b. Authentification (comptes réels, accès par serveur) --- */
+
+function authScreenEl() { return document.querySelector("#authScreen"); }
+function showAuthScreen() {
+  const shell = document.querySelector(".app-shell");
+  if (shell) shell.style.display = "none";
+  authScreenEl().classList.add("show");
+}
+function hideAuthScreen() {
+  authScreenEl().classList.remove("show");
+  authScreenEl().innerHTML = "";
+  const shell = document.querySelector(".app-shell");
+  if (shell) shell.style.display = "";
+}
+function handleUnauthorized() {
+  authToken = null;
+  currentAccount = null;
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch { /* stockage indisponible */ }
+  showAuthScreen();
+  renderLoginScreen("Session expirée — reconnectez-vous.");
+}
+
+function renderSetupScreen(error) {
+  authScreenEl().innerHTML = `<div class="auth-card">
+    <img class="auth-logo" src="./assets/logo-sinai.png" alt="">
+    <h1>Bienvenue sur CRM Sinaï</h1>
+    <p class="auth-subtitle">Première connexion : créez le compte administrateur.</p>
+    ${error ? `<div class="auth-error">${escapeHtml(error)}</div>` : ""}
+    <form class="auth-form" id="setupForm">
+      <div class="auth-name-row">
+        <label>Prénom<input name="first" required autocomplete="given-name"></label>
+        <label>Nom<input name="last" required autocomplete="family-name"></label>
+      </div>
+      <label>Email<input name="email" type="email" required autocomplete="username"></label>
+      <label>Mot de passe<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <button type="submit" class="primary-btn">Créer mon compte</button>
+    </form>
+  </div>`;
+  document.querySelector("#setupForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const res = await apiSetupAdmin(data);
+      authToken = res.token; currentAccount = res.account;
+      try { localStorage.setItem(AUTH_TOKEN_KEY, authToken); } catch { /* stockage indisponible */ }
+      hideAuthScreen();
+      bootApp();
+    } catch (err) { renderSetupScreen(err.message); }
+  });
+}
+
+function renderLoginScreen(error) {
+  authScreenEl().innerHTML = `<div class="auth-card">
+    <img class="auth-logo" src="./assets/logo-sinai.png" alt="">
+    <h1>CRM Sinaï</h1>
+    <p class="auth-subtitle">Connectez-vous pour accéder à votre espace.</p>
+    ${error ? `<div class="auth-error">${escapeHtml(error)}</div>` : ""}
+    <form class="auth-form" id="loginForm">
+      <label>Email<input name="email" type="email" required autocomplete="username"></label>
+      <label>Mot de passe<input name="password" type="password" required autocomplete="current-password"></label>
+      <button type="submit" class="primary-btn">Se connecter</button>
+    </form>
+  </div>`;
+  document.querySelector("#loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const res = await apiLogin(data);
+      authToken = res.token; currentAccount = res.account;
+      try { localStorage.setItem(AUTH_TOKEN_KEY, authToken); } catch { /* stockage indisponible */ }
+      hideAuthScreen();
+      bootApp();
+    } catch (err) { renderLoginScreen(err.message); }
+  });
+}
+
+function updateProfileCard() {
+  const card = document.querySelector("#profileCard");
+  if (!card || !currentAccount) return;
+  const name = `${currentAccount.first || ""} ${currentAccount.last || ""}`.trim() || currentAccount.email;
+  const scopeNote = currentAccount.scopeMode === "tags" ? "Accès restreint par catégorie" : "Accès à tous les contacts";
+  card.innerHTML = `<span class="eyebrow">${escapeHtml(currentAccount.profile)}</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(currentAccount.email)} · ${escapeHtml(scopeNote)}</p>`;
+}
+
 async function boot() {
+  authToken = (() => { try { return localStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; } })();
+  const status = await apiAuthStatus();
+  if (status.setupRequired) {
+    showAuthScreen();
+    renderSetupScreen();
+    return;
+  }
+  if (authToken) {
+    currentAccount = await apiMe();
+    if (!currentAccount) {
+      authToken = null;
+      try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch { /* stockage indisponible */ }
+    }
+  }
+  if (!currentAccount) {
+    showAuthScreen();
+    renderLoginScreen();
+    return;
+  }
+  hideAuthScreen();
+  bootApp();
+}
+
+async function bootApp() {
+  updateProfileCard();
+  await refreshAccounts();
   seedFromImportedContacts();
   const server = await apiGetState();
   const backup = server || loadLocalBackup();
@@ -1438,6 +1754,12 @@ document.querySelector("#bnavContacts")?.addEventListener("click", () => { close
 document.querySelector("#bnavPayments")?.addEventListener("click", () => { closeNav(); navigate("pay", "Tous les paiements"); });
 document.querySelector("#bnavInteractions")?.addEventListener("click", () => { closeNav(); navigate("crm", "Interactions"); });
 document.querySelector("#bnavMenu")?.addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
+
+document.querySelector("#logoutBtn")?.addEventListener("click", async () => {
+  await apiLogout();
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch { /* stockage indisponible */ }
+  location.reload();
+});
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   window.addEventListener("load", () => navigator.serviceWorker.register("./service-worker.js").catch(() => {}));

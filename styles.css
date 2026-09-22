@@ -669,6 +669,37 @@ textarea { min-height: 94px; resize: vertical; }
 .load-more { width: 100%; margin-top: 4px; background: var(--surface-alt); border-color: transparent; border-radius: 0; }
 .load-more:hover { background: var(--accent-soft); color: var(--accent-2); }
 
+/* ---------- Authentification (première configuration / connexion) ------- */
+.auth-screen { display: none; position: fixed; inset: 0; z-index: 30; background: var(--bg); align-items: center; justify-content: center; padding: 24px; overflow: auto; }
+.auth-screen.show { display: flex; }
+.auth-card { width: min(400px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow); padding: 32px 30px; display: grid; gap: 18px; }
+.auth-logo { width: 72px; margin: 0 auto 4px; display: block; }
+.auth-card h1 { font-size: 21px; text-align: center; }
+.auth-card p.auth-subtitle { text-align: center; margin-top: -8px; font-size: 13px; }
+.auth-form { display: grid; gap: 12px; }
+.auth-form label { display: grid; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.auth-form input { border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 0 12px; min-height: 40px; background: #fff; }
+.auth-form .primary-btn { width: 100%; min-height: 42px; margin-top: 4px; }
+.auth-error { background: var(--danger-soft); color: var(--danger); border-radius: var(--radius); padding: 9px 12px; font-size: 12.5px; font-weight: 600; text-align: center; }
+.auth-switch { text-align: center; font-size: 12.5px; color: var(--muted); }
+.auth-switch button { border: 0; background: transparent; color: var(--accent); font-weight: 700; padding: 0; min-height: 0; }
+.auth-switch button:hover { background: transparent; color: var(--accent-2); text-decoration: underline; }
+.auth-name-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.logout-btn { width: 100%; margin-top: -6px; background: var(--surface); border-color: var(--line-strong); color: var(--muted); font-size: 12px; }
+.logout-btn:hover { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-soft); }
+
+/* Salutation personnalisée de l'accueil */
+.home-greeting { font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+.home-greeting strong { color: var(--accent); font-weight: 800; }
+
+/* Gestion des comptes (Administration > Utilisateurs) */
+.scope-tags { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-alt); }
+.scope-tag-chip { display: flex; align-items: center; gap: 5px; min-height: 0; padding: 5px 10px; font-size: 12px; border-radius: 999px; background: #fff; border: 1px solid var(--line); font-weight: 500; }
+.scope-tag-chip input { margin: 0; }
+.scope-tag-chip:has(input:checked) { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent-2); }
+.account-scope-mode { display: flex; gap: 8px; margin-bottom: 8px; }
+
 /* Repositionne le bouton "+" flottant au-dessus de la barre de navigation du
    bas (doit venir après la règle .fab de base pour gagner la cascade). */
 @media (max-width: 720px) {
