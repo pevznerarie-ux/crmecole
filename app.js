@@ -856,7 +856,7 @@ function hpTaskRow(t) {
     <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""}>
     <div class="hp-task-main">
       <span class="hp-task-title">${escapeHtml(t.title)}</span>
-      ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
+      ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
     </div>
     <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
     ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
@@ -1031,7 +1031,7 @@ function hpCard(icon, title, rows) {
 function hpActivityItem(i) {
   const r = recordById(i.recordId);
   const name = r ? r.name : (i.target || "Contact supprimé");
-  return `<button class="hp-timeline-item" type="button" data-action="open-record:${i.recordId}">
+  return `<button class="hp-timeline-item" type="button" data-action="open-record:${i.recordId}:Activité">
     <span class="hp-timeline-dot"></span>
     <span class="hp-timeline-body">
       <span class="hp-timeline-top"><strong>${escapeHtml(name)}</strong><span class="hp-timeline-kind">${escapeHtml(i.type || "")}</span></span>
@@ -1128,11 +1128,11 @@ function interactionsView() {
   return `<section class="panel">${toolbar("Rechercher dans les interactions")}<div class="toolbar thin"><div class="row-actions">${action("Ajouter une interaction", "add-interaction", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
     ${rows.length ? `<div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Contact / structure</th><th>Catégorie</th><th>Libellé</th><th>Type</th><th>Note</th><th>Utilisateur</th></tr></thead><tbody>${rows.map(r=>{
       const rec = recordById(r.recordId);
-      return `<tr class="row-click" data-action="open-record:${r.recordId}"><td>${r.date}</td><td>${escapeHtml(rec ? rec.name : (r.target || "-"))}</td><td>${r.category||"-"}</td><td>${escapeHtml(r.label||"-")}</td><td>${r.type==="Commentaire"?tag("Commentaire","violet"):r.type}</td><td>${escapeHtml(r.note||"-")}</td><td>${r.user}</td></tr>`;
+      return `<tr class="row-click" data-action="open-record:${r.recordId}:Activité"><td>${r.date}</td><td>${escapeHtml(rec ? rec.name : (r.target || "-"))}</td><td>${r.category||"-"}</td><td>${escapeHtml(r.label||"-")}</td><td>${r.type==="Commentaire"?tag("Commentaire","violet"):r.type}</td><td>${escapeHtml(r.note||"-")}</td><td>${r.user}</td></tr>`;
     }).join("")}</tbody></table></div>
     <div class="record-cards mobile-only">${rows.map(r=>{
       const rec = recordById(r.recordId);
-      return `<button type="button" class="record-card" data-action="open-record:${r.recordId}">
+      return `<button type="button" class="record-card" data-action="open-record:${r.recordId}:Activité">
         <div class="record-card-head"><strong>${escapeHtml(rec ? rec.name : (r.target || "-"))}</strong><span>${r.date}</span></div>
         <p>${r.type==="Commentaire" ? "Commentaire" : escapeHtml(r.category||r.type||"-")}${r.label ? " — " + escapeHtml(r.label) : ""}</p>
         ${r.note ? `<p>${escapeHtml(r.note)}</p>` : ""}
@@ -1159,8 +1159,8 @@ function paymentTable(type = null) {
     <div class="pay-tabs">${["Tous les paiements","Dons","Adhésions","Billetterie","Reçus"].map(s => `<button class="${state.section===s ? "active" : ""}" data-view="pay" data-section="${s}">${s}</button>`).join("")}</div>
     ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p>
     <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Occasion</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
-    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
-    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}">
+    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}:Paiements">
       <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
       <p>${escapeHtml(p.type)} · ${p.date} · ${escapeHtml(p.method || "-")}</p>
       <div class="chip-list">${status(p.status)} ${status(p.receipt)} ${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ")}</div>
@@ -1179,7 +1179,7 @@ function receipts() {
   const { visible, remaining } = visiblePage(rows, "paymentsPage");
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
   return `<div class="split"><section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Générer les reçus manquants", "generate-receipts", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p><div class="table-wrap"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th></tr></thead><tbody>${visible.map((p,i)=>`<tr><td>${p.receipt==="Genere"||p.receipt==="Généré"||p.receipt==="Disponible" ? `RF-${new Date().getFullYear()}-${1000+i}` : "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
+    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p><div class="table-wrap"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th></tr></thead><tbody>${visible.map((p,i)=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receipt==="Genere"||p.receipt==="Généré"||p.receipt==="Disponible" ? `RF-${new Date().getFullYear()}-${1000+i}` : "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
     </section><section class="panel pad"><span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2><div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>${action("Ajouter un modèle", "add-receipt-template")}</section></div>`;
 }
 
@@ -1578,7 +1578,22 @@ function navigate(view, section) {
 
 function handleAction(key) {
   if (!key) return;
-  if (key.startsWith("open-record:")) { const id = key.split(":")[1]; if (recordById(id)) { navigate("crm", recordById(id).kind === "Structure" ? "Structures" : "Contacts"); state.selectedRecord = id; state.showDetail = true; state.tab = "Details"; render(); } return; }
+  // "open-record:<id>" ouvre la fiche sur l'onglet Détails ; "open-record:<id>:<Onglet>"
+  // ouvre directement sur l'onglet pertinent (ex : un clic sur un don ouvre la fiche
+  // sur "Paiements", un clic sur une interaction l'ouvre sur "Activité") pour qu'on
+  // retrouve tout de suite ce qu'on est venu voir, et qu'on puisse le suivre / le
+  // mettre à jour sans re-naviguer soi-même dans les onglets.
+  if (key.startsWith("open-record:")) {
+    const [, id, tab] = key.split(":");
+    if (recordById(id)) {
+      navigate("crm", recordById(id).kind === "Structure" ? "Structures" : "Contacts");
+      state.selectedRecord = id;
+      state.showDetail = true;
+      state.tab = tab || "Details";
+      render();
+    }
+    return;
+  }
   if (key.startsWith("quick-interaction:")) return openQuickForRecord(key.split(":")[1], "interaction");
   if (key.startsWith("quick-payment:")) return openQuickForRecord(key.split(":")[1], "payment");
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
