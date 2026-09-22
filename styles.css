@@ -472,6 +472,14 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
   .workspace-hero { grid-template-columns: 1fr; align-items: start; }
   .split, .hero-grid, .records-layout, .report-grid, .records-command { grid-template-columns: 1fr; }
   .detail-card { position: static; }
+  /* Sur mobile/tablette, liste et fiche sont empilées dans une seule colonne.
+     Sans ça, cliquer un contact (ou un don/une interaction qui ouvre une
+     fiche) l'ajoutait bien au DOM mais tout en bas d'une liste de plusieurs
+     milliers de lignes : invisible sans un très long scroll, donc l'effet
+     était "ça n'ouvre rien". On masque donc la liste tant qu'une fiche est
+     affichée ; le bouton "✕ Fermer et voir toute la liste" sur la fiche
+     permet d'y revenir. */
+  .records-layout.mobile-detail-open .records-panel { display: none; }
   .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }

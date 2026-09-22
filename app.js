@@ -287,6 +287,11 @@ const state = {
   recordsPage: 80,
   paymentsPage: 80,
   showDoneTasks: false,
+  // Distingue "une fiche est affichée par défaut à côté de la liste" (desktop,
+  // toujours vrai) de "on vient d'ouvrir explicitement une fiche précise" —
+  // c'est ce deuxième cas qui doit, sur mobile, remplacer la liste par la
+  // fiche au lieu de l'empiler tout en bas (voir styles.css, .mobile-detail-open).
+  mobileDetailOpen: false,
 };
 
 const PAGE_STEP = 80;
@@ -1073,7 +1078,7 @@ function recordsView(kind) {
   const showDetail = state.showDetail && rows.length && selected;
   const { visible, remaining } = visiblePage(rows, "recordsPage");
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-records">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
-  return `<div class="records-layout${showDetail ? "" : " no-detail"}">
+  return `<div class="records-layout${showDetail ? "" : " no-detail"}${showDetail && state.mobileDetailOpen ? " mobile-detail-open" : ""}">
     <section class="panel records-panel">
       <div class="records-command">
         <div>
@@ -1474,11 +1479,12 @@ function bind() {
     state.query = "";
     state.drawer = null;
     state.showDetail = true;
+    state.mobileDetailOpen = false;
     closeNav();
     render();
   }));
   document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", () => handleAction(el.dataset.action)));
-  document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.tab = "Details"; render(); }));
+  document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details"; render(); scrollToTop(); }));
   document.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
   document.querySelectorAll("[data-category-index]").forEach(el => {
     el.addEventListener("change", () => { renameInteractionCategory(Number(el.dataset.categoryIndex), el.value); render(); });
@@ -1569,9 +1575,21 @@ function navigate(view, section) {
   state.query = "";
   state.drawer = null;
   state.showDetail = true;
+  // Par défaut, une navigation "générale" (menu, "Voir les interactions"...)
+  // n'ouvre pas explicitement une fiche précise sur mobile ; open-record
+  // remet ce drapeau à true juste après avoir appelé navigate().
+  state.mobileDetailOpen = false;
   state.recordsPage = PAGE_STEP;
   state.paymentsPage = PAGE_STEP;
   render();
+}
+// Remonte en haut de la page après ouverture d'une fiche. Sur mobile, la fiche
+// et la liste sont empilées dans une seule colonne (et la liste peut compter
+// des milliers de lignes) : sans ça, la fiche s'ouvrait bien mais restait
+// invisible tout en bas, hors écran — on avait l'impression que rien ne
+// s'ouvrait en cliquant sur un contact ou un don.
+function scrollToTop() {
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 }
 
 /* ---------- 9. Modales & actions rapides -------------------------------- */
@@ -1589,8 +1607,10 @@ function handleAction(key) {
       navigate("crm", recordById(id).kind === "Structure" ? "Structures" : "Contacts");
       state.selectedRecord = id;
       state.showDetail = true;
+      state.mobileDetailOpen = true;
       state.tab = tab || "Details";
       render();
+      scrollToTop();
     }
     return;
   }
@@ -1632,8 +1652,8 @@ function handleAction(key) {
     "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { p.receipt = "Généré"; n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
     "edit-record": () => openModal("editRecord"),
     "delete-record": () => deleteSelectedRecord(),
-    "close-detail": () => { state.showDetail = false; render(); },
-    "open-detail": () => { state.showDetail = true; render(); },
+    "close-detail": () => { state.showDetail = false; state.mobileDetailOpen = false; render(); },
+    "open-detail": () => { state.showDetail = true; state.mobileDetailOpen = true; render(); scrollToTop(); },
     "goto-receipts": () => navigate("pay", "Reçus"),
     "goto-interactions": () => navigate("crm", "Interactions"),
     "goto-contacts": () => navigate("crm", "Contacts"),
