@@ -1072,12 +1072,12 @@ function paymentTable(type = null) {
   return `<section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Ajouter un paiement", `add-payment:${type || "Don"}`, "primary-btn")} ${action("Générer les reçus manquants", "generate-receipts")} ${action("Exporter", "export-current")}</div></div>
     <div class="pay-tabs">${["Tous les paiements","Dons","Adhésions","Billetterie","Reçus"].map(s => `<button class="${state.section===s ? "active" : ""}" data-view="pay" data-section="${s}">${s}</button>`).join("")}</div>
     ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p>
-    <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
-    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Occasion</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
+    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
     <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}">
       <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
       <p>${escapeHtml(p.type)} · ${p.date} · ${escapeHtml(p.method || "-")}</p>
-      <div class="chip-list">${status(p.status)} ${status(p.receipt)}</div>
+      <div class="chip-list">${status(p.status)} ${status(p.receipt)} ${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ")}</div>
     </button>`).join("")}${loadMore}</div>` : emptyState("Aucun paiement enregistré pour l'instant.", "Ajouter un don", "add-payment:Don")}
   </section>`;
 }
@@ -1243,7 +1243,7 @@ function recordDetailBody(r) {
   if (state.tab === "Paiements") {
     const feed = recordLivePayments(r.id);
     const importedNote = r.importedAmount ? `<p class="muted-note">+ ${euro(r.importedAmount)} sur ${r.importedPaymentsCount || 0} paiement(s) historiques importés avant le CRM.</p>` : "";
-    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p><span class="timeline-date">${p.date}</span></div>`).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
+    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span></div>`).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   }
   if (state.tab === "Categorisation") {
     const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
@@ -1524,27 +1524,40 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   dialogContent().querySelectorAll("[data-modal-close]").forEach(btn => btn.addEventListener("click", () => d.close()));
   wirePickers(dialogContent());
   wireCategoryAdders(dialogContent());
-  dialogContent().querySelector("input, select, textarea")?.focus();
+  // Une "Promesse" (don pas encore reçu) doit se voir proposer un statut
+  // "En attente" par défaut plutôt que "Validé".
+  const typeSelect = dialogContent().querySelector('select[name="type"]');
+  const statusSelect = dialogContent().querySelector('select[name="status"]');
+  if (typeSelect && statusSelect) {
+    typeSelect.addEventListener("change", () => {
+      if (typeSelect.value === "Promesse") statusSelect.value = "En attente";
+    });
+  }
+  dialogContent().querySelector("input:not([readonly]), select, textarea")?.focus();
 }
 
+function contactLockedField(r) {
+  return `<label class="span-2">Contact / structure<input type="text" value="${escapeHtml(r.name)}" readonly class="field-locked"><input type="hidden" name="recordId" value="${r.id}"></label>`;
+}
 function openQuickForRecord(recordId, kind) {
   const r = recordById(recordId);
   if (!r) return notify("Fiche introuvable");
   if (kind === "payment") return modalShell("payment", "Don pour " + r.name, "Ajouter un don / paiement",
-    `<input type="hidden" name="recordId" value="${r.id}">
+    `${contactLockedField(r)}
      ${field("Montant (€)", "amount", "", "number", "min='0' step='1' required")}
-     ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], "Don")}
+     ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], "Don")}
      ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-     ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}`);
+     ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}
+     ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
-    `<input type="hidden" name="recordId" value="${r.id}">
+    `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
      ${categoryField(interactionCategories[0] || "Suivi")}
      ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Appel")}
      ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
      ${textareaField("Détail (optionnel)", "note", "")}`);
   return modalShell("comment", "Commentaire sur " + r.name, "Ajouter un commentaire",
-    `<input type="hidden" name="recordId" value="${r.id}">
+    `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
      ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile sur ce contact...'")}`, "Ajouter le commentaire");
 }
@@ -1574,9 +1587,10 @@ function openModal(kind, options = {}) {
     payment: () => modalShell("payment", "Paiement", "Ajouter un paiement",
       `${pickerField("Payeur", "recordId", selected)}
        ${field("Montant (€)", "amount", "", "number", "min='0' step='1' required")}
-       ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], options.type || "Don")}
+       ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], options.type || "Don")}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-       ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}`),
+       ${selectField("Statut", "status", ["Validé","En attente"], options.type === "Promesse" ? "En attente" : "Validé")}
+       ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
     account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
     field: () => modalShell("field", "Paramètres", "Ajouter un champ personnalisé",
@@ -1629,7 +1643,7 @@ function submitForm(event) {
     payment: () => {
       const payer = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.payer);
       if (!payer) { notify("Payeur introuvable"); return; }
-      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, receipt: data.type === "Don" ? "À générer" : "Non éligible" };
+      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: data.type === "Don" ? "À générer" : "Non éligible" };
       payments.unshift(p);
       logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
       state.selectedRecord = payer.id; state.tab = "Paiements";
