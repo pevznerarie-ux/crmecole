@@ -828,28 +828,71 @@ function hpTasksPanel() {
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
   return `<section class="hp-tasks">
     <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span></div>
-    <form class="hp-task-form" id="hpTaskForm">
-      <input type="text" name="title" placeholder="Ajouter une tâche…" maxlength="140" required>
+    <form class="hp-task-form" id="hpTaskForm" autocomplete="off">
+      <div class="hp-task-input-wrap">
+        <input type="text" name="title" id="hpTaskTitle" placeholder="Ajouter une tâche… ex. « Contacter Dupont »" maxlength="140" required>
+        <div class="hp-task-suggest" id="hpTaskSuggest" hidden></div>
+      </div>
+      <input type="hidden" name="recordId" id="hpTaskRecordId" value="">
       <input type="date" name="dueDate" value="${todayIso()}">
       <button type="submit" class="hp-task-add" title="Ajouter">+</button>
+      <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
     </form>
     ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
   </section>`;
 }
 function hpTaskRow(t) {
   const due = taskDueInfo(t);
-  return `<label class="hp-task-row">
-    <input type="checkbox" data-action="toggle-task:${t.id}">
-    <span class="hp-task-title">${escapeHtml(t.title)}</span>
-    ${due.label ? `<span class="hp-task-due hp-task-due-${due.tone}">${escapeHtml(due.label)}</span>` : ""}
+  const linkedRecord = t.recordId ? recordById(t.recordId) : null;
+  return `<div class="hp-task-row">
+    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}">
+    <div class="hp-task-main">
+      <span class="hp-task-title">${escapeHtml(t.title)}</span>
+      ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
+    </div>
+    <input type="date" class="hp-task-date hp-task-date-${due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
     ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
     <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
-  </label>`;
+  </div>`;
 }
-function addHomeTask(title, dueDate) {
+// Reconnaît un verbe d'action suivi d'un nom ("Contacter Dupont", "Relancer
+// Cohen"...) pour proposer des fiches du CRM en autocomplétion ; à défaut de
+// verbe reconnu, on tente quand même avec le texte tapé s'il est assez long.
+const TASK_TRIGGER_WORDS = ["contacter", "contact", "appeler", "rappeler", "relancer", "relance", "voir", "rencontrer", "rdv", "rendez-vous", "email", "mail", "écrire", "ecrire", "suivre", "suivi", "joindre"];
+function taskContactQuery(raw) {
+  const value = (raw || "").trim();
+  if (value.length < 2) return "";
+  const lower = value.toLowerCase();
+  let bestIdx = -1, bestWord = "";
+  TASK_TRIGGER_WORDS.forEach(w => {
+    const idx = lower.lastIndexOf(w);
+    if (idx > bestIdx) { bestIdx = idx; bestWord = w; }
+  });
+  if (bestIdx >= 0) {
+    const after = value.slice(bestIdx + bestWord.length).replace(/^[\s:,-]+/, "").trim();
+    return after.length >= 2 ? after : "";
+  }
+  return value.length >= 3 ? value : "";
+}
+function normalizeSearchText(s) {
+  return String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+function matchRecordsForTask(query) {
+  const q = normalizeSearchText(query);
+  if (!q) return [];
+  const scored = [];
+  for (const r of records) {
+    const name = normalizeSearchText(r.name || "");
+    if (name && name.includes(q)) scored.push({ r, rank: name.startsWith(q) ? 0 : 1 });
+  }
+  scored.sort((a, b) => a.rank - b.rank || (a.r.name || "").localeCompare(b.r.name || "", "fr"));
+  return scored.slice(0, 6).map(s => s.r);
+}
+function addHomeTask(title, dueDate, recordId) {
   const clean = (title || "").trim();
   if (!clean) return;
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
+  const linked = recordId ? recordById(recordId) : null;
   tasks.unshift({
     id: `T-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
     title: clean,
@@ -858,8 +901,9 @@ function addHomeTask(title, dueDate) {
     assignedTo: me,
     createdBy: me,
     createdAt: nowIso(),
+    recordId: linked ? linked.id : null,
   });
-  logAudit(`Tâche ajoutée : ${clean}.`);
+  logAudit(`Tâche ajoutée : ${clean}${linked ? ` (liée à ${linked.name})` : ""}.`);
   saveCrmData();
   render();
 }
@@ -1346,7 +1390,51 @@ function bind() {
     e.preventDefault();
     const form = e.target;
     const data = new FormData(form);
-    addHomeTask(data.get("title"), data.get("dueDate"));
+    addHomeTask(data.get("title"), data.get("dueDate"), data.get("recordId"));
+  });
+  (() => {
+    const titleInput = document.querySelector("#hpTaskTitle");
+    const suggestBox = document.querySelector("#hpTaskSuggest");
+    const recordIdInput = document.querySelector("#hpTaskRecordId");
+    const linkedBox = document.querySelector("#hpTaskLinked");
+    const linkedName = document.querySelector("#hpTaskLinkedName");
+    const unlinkBtn = document.querySelector("#hpTaskUnlink");
+    if (!titleInput || !suggestBox) return;
+    titleInput.addEventListener("input", () => {
+      if (recordIdInput) recordIdInput.value = "";
+      if (linkedBox) linkedBox.hidden = true;
+      const query = taskContactQuery(titleInput.value);
+      const matches = query ? matchRecordsForTask(query) : [];
+      if (!matches.length) { suggestBox.hidden = true; suggestBox.innerHTML = ""; return; }
+      suggestBox.innerHTML = matches.map(r => `<button type="button" class="hp-task-suggest-item" data-id="${r.id}">${escapeHtml(r.name || "")}<span class="hp-task-suggest-kind">${r.kind === "Structure" ? "Structure" : "Contact"}</span></button>`).join("");
+      suggestBox.hidden = false;
+    });
+    titleInput.addEventListener("blur", () => { setTimeout(() => { suggestBox.hidden = true; }, 150); });
+    suggestBox.addEventListener("mousedown", e => {
+      const btn = e.target.closest(".hp-task-suggest-item");
+      if (!btn) return;
+      e.preventDefault();
+      const rec = recordById(btn.dataset.id);
+      if (!rec) return;
+      if (recordIdInput) recordIdInput.value = rec.id;
+      if (linkedName) linkedName.textContent = rec.name || "";
+      if (linkedBox) linkedBox.hidden = false;
+      suggestBox.hidden = true;
+      suggestBox.innerHTML = "";
+    });
+    unlinkBtn?.addEventListener("click", () => {
+      if (recordIdInput) recordIdInput.value = "";
+      if (linkedBox) linkedBox.hidden = true;
+    });
+  })();
+  document.querySelectorAll(".hp-task-date").forEach(el => {
+    el.addEventListener("change", () => {
+      const t = tasks.find(x => x.id === el.dataset.task);
+      if (!t) return;
+      t.dueDate = el.value || "";
+      saveCrmData();
+      render();
+    });
   });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
