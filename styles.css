@@ -879,6 +879,21 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-tasks-done-toggle { margin-top: 10px; }
 .hp-task-list-done { margin-top: 8px; border-top: 1px dashed var(--hp-line); padding-top: 6px; }
 
+/* ---- Mon portefeuille (accueil) : suivi des relations donateurs -------- */
+.hp-portfolio { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-portfolio .hp-activity-head { margin-bottom: 14px; }
+.hp-portfolio-list { display: flex; flex-direction: column; }
+.hp-portfolio-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); }
+.hp-portfolio-row:last-child { border-bottom: none; }
+.hp-portfolio-main { display: flex; align-items: center; gap: 12px; background: none; border: none; padding: 0; text-align: left; cursor: pointer; flex: 1; min-width: 200px; }
+.hp-portfolio-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.hp-portfolio-dot-ok { background: #4d9a63; }
+.hp-portfolio-dot-soon { background: #d69a2d; }
+.hp-portfolio-dot-late, .hp-portfolio-dot-never { background: var(--hp-rust); }
+.hp-portfolio-info { display: flex; flex-direction: column; }
+.hp-portfolio-info strong { font-size: 14px; color: var(--hp-ink); }
+.hp-portfolio-meta { font-size: 12px; color: var(--hp-muted); }
+
 /* ---- Stratégie des fêtes juives (accueil) ------------------------------ */
 .hp-holidays { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
 .hp-holidays .hp-activity-head { margin-bottom: 14px; }
@@ -952,6 +967,8 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .hp-task-controls { flex: 1 1 100%; justify-content: flex-end; }
   .hp-holiday-row { flex-direction: column; align-items: stretch; }
   .hp-holiday-row button { width: 100%; }
+  .hp-portfolio-row { flex-direction: column; align-items: stretch; }
+  .hp-portfolio-row button.primary-btn { width: 100%; }
 }
 
 /* Sous iOS/Safari (et la plupart des navigateurs mobiles), un champ de

@@ -863,6 +863,8 @@ function home() {
 
       ${hpTasksPanel()}
 
+      ${hpPortfolioPanel()}
+
       ${hpHolidayPanel()}
 
       <section class="hp-columns">
@@ -1034,6 +1036,108 @@ function legacyCopy(el) {
   } catch {
     notify("Impossible de copier automatiquement — sélectionnez le texte manuellement.");
   }
+}
+
+// ---- Portefeuille : suivi personnalisé des relations donateurs -----------
+// Logique "directeur de collecte de fonds" : chaque donateur suivi
+// personnellement (champ "agent" — déjà utilisé par les imports GALA sous
+// "ARIE"/"JP", ou ajouté ici à la main) doit recevoir au moins un vrai
+// contact par mois. On calcule le nombre de jours depuis la dernière
+// interaction réellement enregistrée (recordLiveInteractions) et on remonte
+// en premier ceux qu'on n'a jamais recontactés, puis ceux qui prennent du
+// retard. "Enregistrer un contact" demande toujours pourquoi (note
+// obligatoire) : au fil des mois d'utilisation, ça construit un vrai
+// historique du sens de la relation avec chaque donateur du portefeuille,
+// pas juste une date de dernier appel.
+function normalizeAgentCode(str) {
+  return String(str || "").normalize("NFD").replace(/[̀-ͯ]/g, "").trim().toUpperCase();
+}
+function myAgentCode() {
+  if (!currentAccount) return "";
+  const first = currentAccount.first || (currentAccount.email || "").split("@")[0] || "";
+  return normalizeAgentCode(first);
+}
+function isInMyPortfolio(r) {
+  const mine = myAgentCode();
+  return !!mine && normalizeAgentCode(r.agent) === mine;
+}
+function myPortfolioRecords() {
+  const mine = myAgentCode();
+  if (!mine) return [];
+  return records.filter(r => normalizeAgentCode(r.agent) === mine);
+}
+function lastContactIso(r) {
+  const feed = recordLiveInteractions(r.id); // déjà trié du plus récent au plus ancien
+  // Les interactions saisies dans l'app ont un "at" en horodatage ISO complet
+  // (ex : 2026-09-23T15:25:08.000Z), celles importées avant le CRM n'ont
+  // qu'une date simple (ex : 2024-06-17) : on ne garde que les 10 premiers
+  // caractères pour retomber sur AAAA-MM-JJ dans les deux cas.
+  return feed.length ? String(feed[0].at || "").slice(0, 10) : null;
+}
+function daysSincePortfolioContact(r) {
+  const last = lastContactIso(r);
+  if (!last) return null;
+  return daysBetweenIso(last, todayIso());
+}
+function portfolioTone(days) {
+  if (days === null) return "never";
+  if (days >= 45) return "late";
+  if (days >= 25) return "soon";
+  return "ok";
+}
+const PORTFOLIO_TONE_ORDER = { never: 0, late: 1, soon: 2, ok: 3 };
+function hpPortfolioPanel() {
+  const mine = myAgentCode();
+  if (!mine) return "";
+  const list = myPortfolioRecords()
+    .map(r => { const days = daysSincePortfolioContact(r); return { r, days, tone: portfolioTone(days) }; })
+    .sort((a, b) => PORTFOLIO_TONE_ORDER[a.tone] - PORTFOLIO_TONE_ORDER[b.tone] || (b.days ?? 99999) - (a.days ?? 99999));
+  const overdue = list.filter(x => x.tone === "never" || x.tone === "late").length;
+  const shown = list.slice(0, 8);
+  return `<section class="hp-portfolio">
+    <div class="hp-activity-head"><h2>Mon portefeuille</h2><span class="hp-tasks-count">${list.length ? (overdue ? `${overdue} à recontacter` : "Tout est à jour") : "Aucun contact suivi"}</span></div>
+    ${list.length ? `<div class="hp-portfolio-list">${shown.map(hpPortfolioRow).join("")}</div>${list.length > shown.length ? `<p class="muted-note">+ ${list.length - shown.length} autre(s) contact(s) dans le portefeuille.</p>` : ""}`
+      : `<p class="muted-note">Ajoutez les donateurs que vous suivez personnellement pour ne plus jamais en perdre un — l'objectif est un vrai contact au moins une fois par mois.</p>`}
+    <button type="button" class="hp-link" data-action="add-to-portfolio">+ Ajouter un contact à mon portefeuille</button>
+  </section>`;
+}
+function hpPortfolioRow({ r, days, tone }) {
+  const label = tone === "never" ? "Jamais contacté depuis l'utilisation du CRM" : `Dernier contact il y a ${days} jour${days > 1 ? "s" : ""}`;
+  const amount = recordTotalAmount(r);
+  return `<div class="hp-portfolio-row">
+    <button type="button" class="hp-portfolio-main" data-action="open-record:${r.id}:Activité">
+      <span class="hp-portfolio-dot hp-portfolio-dot-${tone}"></span>
+      <span class="hp-portfolio-info"><strong>${escapeHtml(r.name)}</strong><span class="hp-portfolio-meta">${amount ? euro(amount) + " donnés · " : ""}${label}</span></span>
+    </button>
+    ${action("Enregistrer un contact", `portfolio-touch:${r.id}`, "primary-btn")}
+  </div>`;
+}
+function openPortfolioTouch(id) {
+  const r = recordById(id);
+  if (!r) return notify("Fiche introuvable");
+  modalShell("portfolioTouch", "Mon portefeuille", `Enregistrer un contact — ${r.name}`,
+    `<input type="hidden" name="recordId" value="${escapeHtml(r.id)}">
+     ${selectField("Type de contact", "type", ["Appel téléphonique", "Message (SMS/WhatsApp)", "Email", "Rencontre"], "Appel téléphonique")}
+     ${field("Date", "date", todayIso(), "date", "required")}
+     ${textareaField("Pourquoi ce contact ? Qu'est-ce qui s'est dit ?", "note", "", "required placeholder='Ex : pris des nouvelles, parlé du renouvellement de son don, invité au prochain évènement...'")}`,
+    "Enregistrer");
+}
+function openAddToPortfolioModal() {
+  modalShell("addToPortfolio", "Mon portefeuille", "Ajouter un contact à mon portefeuille",
+    pickerField("Contact à suivre personnellement", "recordId", null, true),
+    "Ajouter au portefeuille");
+}
+function togglePortfolio(id) {
+  const r = recordById(id);
+  if (!r) return notify("Fiche introuvable");
+  const mine = myAgentCode();
+  if (!mine) return notify("Impossible de déterminer votre portefeuille : prénom du compte manquant.");
+  const already = normalizeAgentCode(r.agent) === mine;
+  r.agent = already ? "" : mine;
+  logAudit(`${r.name} ${already ? "retiré du" : "ajouté au"} portefeuille de ${currentUserLabel()}.`);
+  saveCrmData();
+  render();
+  notify(already ? `${r.name} retiré de votre portefeuille` : `${r.name} ajouté à votre portefeuille`);
 }
 
 // ---- Tâches : premier aperçu "calendrier" sur l'accueil ------------------
@@ -1572,6 +1676,7 @@ function recordDetail(r) {
       ${action("+ Don", `quick-payment:${r.id}`)}
       ${action("+ Tâche", `quick-task:${r.id}`)}
       ${action("+ Commentaire", `quick-comment:${r.id}`)}
+      ${action(isInMyPortfolio(r) ? "★ Dans mon portefeuille" : "+ Ajouter à mon portefeuille", `toggle-portfolio:${r.id}`)}
     </div>
     <div class="tabs">${tabs.map(t => `<button class="tab-btn ${state.tab === t ? "active" : ""}" data-tab="${t}">${t === "Categorisation" ? "Détails +" : t}</button>`).join("")}</div>
     <div class="detail-body">${recordDetailBody(r)}
@@ -1886,6 +1991,9 @@ function handleAction(key) {
   if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
   if (key.startsWith("add-installment:")) return openAddInstallment(key.split(":")[1]);
   if (key.startsWith("holiday-prepare:")) return openHolidayModal(key.split(":")[1]);
+  if (key.startsWith("portfolio-touch:")) return openPortfolioTouch(key.split(":")[1]);
+  if (key.startsWith("toggle-portfolio:")) return togglePortfolio(key.split(":")[1]);
+  if (key === "add-to-portfolio") return openAddToPortfolioModal();
   if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
 
   const actions = {
@@ -2239,6 +2347,21 @@ function submitForm(event) {
       tasks.unshift(t);
       logAudit(`Tâche de relance créée pour ${h.name}.`);
       state.tab = "Tâches";
+    },
+    portfolioTouch: () => {
+      const rec = recordById(data.recordId);
+      if (!rec) { notify("Contact introuvable"); return; }
+      const { display, at } = dateFromInput(data.date);
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi portefeuille", label: data.type, type: data.type, note: data.note, user: currentUserLabel() });
+      logAudit(`Contact de portefeuille enregistré avec ${rec.name}.`);
+    },
+    addToPortfolio: () => {
+      const rec = recordById(data.recordId);
+      if (!rec) { notify("Contact introuvable"); return; }
+      const mine = myAgentCode();
+      if (!mine) { notify("Impossible de déterminer votre portefeuille."); return; }
+      rec.agent = mine;
+      logAudit(`${rec.name} ajouté au portefeuille de ${currentUserLabel()}.`);
     },
     editPayment: () => {
       const p = payments.find(item => item.id === data.paymentId);
