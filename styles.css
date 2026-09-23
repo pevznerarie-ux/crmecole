@@ -510,6 +510,12 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .records-layout.mobile-detail-open .records-panel { display: none; }
   .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* "Modifier toute la fiche" (wide-dialog) gardait ses 4 colonnes fixes
+     même ici, car .wide-dialog .form-grid (plus spécifique) l'emportait
+     toujours sur .form-grid tout court : sur téléphone, chaque champ se
+     retrouvait écrasé sur une largeur de quelques dizaines de pixels,
+     illisible et impossible à remplir. */
+  .wide-dialog .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .fab { display: grid; }
 }
@@ -528,6 +534,7 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .content { padding: 16px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
   .topbar.topbar-hidden + .content { padding-top: calc(16px + env(safe-area-inset-top, 0px)); }
   nav, .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid, .field-grid, .form-grid, .quick-grid, .command-stats { grid-template-columns: 1fr; }
+  .wide-dialog .form-grid { grid-template-columns: 1fr; }
   .workspace-hero { grid-template-columns: 1fr; }
   .workspace-hero h2 { font-size: 30px; }
   .span-2 { grid-column: span 1; }

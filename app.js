@@ -1731,7 +1731,7 @@ function recordDetailBody(r) {
     return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   }
   if (state.tab === "Categorisation") {
-    const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
+    const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Portefeuille", r.agent || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
     return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
   }
   if (state.tab === "Relations") {
@@ -2287,8 +2287,8 @@ function openModal(kind, options = {}) {
     receiptTemplate: () => modalShell("receiptTemplate", "Reçus fiscaux", "Ajouter un modèle de reçu",
       `${field("Nom du modèle", "name", "", "text", "required")}${field("Entité émettrice", "entity", "Réseau Sinaï")}${selectField("Mode", "mode", ["Automatique","Validation","Manuel"], "Validation")}${field("Signature", "signature", "Direction")}`),
     editRecord: () => selected.kind === "Structure"
-      ? modalShell("editRecord", "Fiche structure", `Modifier ${selected.name}`, `${field("Nom", "name", selected.name, "text", "required")}${field("Email", "email", selected.email || "", "email")}${field("Téléphone", "phone", selected.phone || "")}${field("Adresse", "address", selected.address || "")}${field("SIREN", "siren", selected.siren || "")}${field("Forme juridique", "legal", selected.legal || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}`)
-      : modalShell("editRecord", "Fiche contact", `Modifier ${selected.name}`, `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], selected.civility || "")}${field("Prénom", "first", selected.first || "")}${field("Nom", "last", selected.last || "", "text", "required")}${field("Email principal", "email", selected.email || "", "email")}${field("Email secondaire", "secondaryEmails", selected.secondaryEmails || "")}${field("Téléphone", "phone", selected.phone || "")}${field("Téléphone 2", "phone2", selected.phone2 || "")}${field("Date de naissance", "dob", selected.dob || "")}${field("Adresse", "address", selected.address || "")}${field("Code postal", "zip", selected.zip || "")}${field("Ville", "city", selected.city || "")}${field("Pays", "country", selected.country || "")}${field("Famille", "family", selected.family || "")}${field("Rôle de foyer", "role", selected.role || "")}${field("Profession", "profession", selected.profession || "")}${field("École actuelle", "school", selected.school || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${textareaField("Commentaire", "comment", selected.comment || "")}`),
+      ? modalShell("editRecord", "Fiche structure", `Modifier ${selected.name}`, `${field("Nom", "name", selected.name, "text", "required")}${field("Email", "email", selected.email || "", "email")}${field("Téléphone", "phone", selected.phone || "")}${field("Adresse", "address", selected.address || "")}${field("SIREN", "siren", selected.siren || "")}${field("Forme juridique", "legal", selected.legal || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}`)
+      : modalShell("editRecord", "Fiche contact", `Modifier ${selected.name}`, `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], selected.civility || "")}${field("Prénom", "first", selected.first || "")}${field("Nom", "last", selected.last || "", "text", "required")}${field("Email principal", "email", selected.email || "", "email")}${field("Email secondaire", "secondaryEmails", selected.secondaryEmails || "")}${field("Téléphone", "phone", selected.phone || "")}${field("Téléphone 2", "phone2", selected.phone2 || "")}${field("Date de naissance", "dob", selected.dob || "")}${field("Adresse", "address", selected.address || "")}${field("Code postal", "zip", selected.zip || "")}${field("Ville", "city", selected.city || "")}${field("Pays", "country", selected.country || "")}${field("Famille", "family", selected.family || "")}${field("Rôle de foyer", "role", selected.role || "")}${field("Profession", "profession", selected.profession || "")}${field("École actuelle", "school", selected.school || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}${textareaField("Commentaire", "comment", selected.comment || "")}`),
   };
   (modals[kind] || modals.contact)();
 }
@@ -2420,9 +2420,14 @@ function submitForm(event) {
     editRecord: () => {
       const r = records.find(item => item.id === state.selectedRecord);
       if (r) {
-        ["civility","first","last","name","email","secondaryEmails","phone","phone2","dob","address","zip","city","country","family","role","profession","school","comment","siren","legal"].forEach(key => { if (key in data) r[key] = data[key]; });
+        ["civility","first","last","name","email","secondaryEmails","phone","phone2","dob","address","zip","city","country","family","role","profession","school","comment","siren","legal","agent"].forEach(key => { if (key in data) r[key] = data[key]; });
         ["tags","segments","groups"].forEach(key => { if (key in data) r[key] = splitTags(data[key]); });
-        if (!r.name && (r.first || r.last)) r.name = `${r.first || ""} ${r.last || ""}`.trim();
+        // Le nom affiché (titres, listes, recherche, portefeuille...) doit
+        // toujours refléter Prénom + Nom pour un contact — avant, il ne se
+        // recalculait que si le champ "name" était vide au départ, donc
+        // modifier le prénom/nom d'une fiche existante ne mettait jamais à
+        // jour son nom affiché ailleurs dans l'app.
+        if (r.kind !== "Structure" && (r.first || r.last)) r.name = `${r.first || ""} ${r.last || ""}`.trim();
         r.dateModified = todayStr();
         state.tab = "Details";
         logAudit(`Fiche modifiée : ${r.name}.`);
