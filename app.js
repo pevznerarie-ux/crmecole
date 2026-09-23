@@ -506,9 +506,9 @@ function tag(text, tone = "") {
 }
 function status(text) {
   const lower = String(text).toLowerCase();
-  const tone = lower.includes("valide") || lower.includes("termine") || lower.includes("genere") || lower.includes("envoye") ? "ok"
+  const tone = lower.includes("valide") || lower.includes("termine") || lower.includes("genere") || lower.includes("envoye") || lower.includes("reçu") ? "ok"
     : lower.includes("erreur") || lower.includes("non eligible") ? "bad"
-    : lower.includes("attente") || lower.includes("reprendre") || lower.includes("generer") ? "warn" : "";
+    : lower.includes("attente") || lower.includes("reprendre") || lower.includes("generer") || lower.includes("promis") ? "warn" : "";
   return `<span class="status ${tone}">${escapeHtml(text)}</span>`;
 }
 function action(label, key, cls = "") {
@@ -827,16 +827,17 @@ function toolbar(placeholder = "Rechercher un nom, un email ou une ville") {
 function home() {
   const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const missingEmail = records.filter(r => !r.email).length;
-  // "Reste à payer" ne porte que sur les Promesses et les paiements
-  // échelonnés (les seuls dont on suit vraiment un solde restant) : les dons
-  // historiques importés utilisent des libellés de statut très divers
-  // ("Paiement validé", "Chèque encaissé"...) qui ne veulent pas dire
-  // "en attente" même s'ils ne s'écrivent pas exactement "Validé" — les
-  // inclure ferait passer presque tout l'historique pour "restant à payer".
-  // Tient compte des versements déjà reçus sur un paiement échelonné : une
-  // Promesse de 7 700 € dont 5 000 € sont déjà arrivés ne compte plus que
+  // Un don et une promesse sont la même chose, juste à un stade différent :
+  // le Statut ("Reçu" / "Promis") porte toute la distinction, il n'y a plus
+  // de Type "Promesse" séparé. "Reste à payer" ne compte donc que les
+  // paiements explicitement marqués "Promis" par l'appli — jamais les dons
+  // historiques importés, dont les statuts très divers ("Paiement validé",
+  // "Chèque encaissé"...) ne s'écrivent jamais littéralement "Promis" (les
+  // inclure ferait passer presque tout l'historique pour "restant à payer").
+  // Tient compte des versements déjà reçus sur un paiement échelonné : un
+  // don promis de 7 700 € dont 5 000 € sont déjà arrivés ne compte plus que
   // pour 2 700 € restants, pas pour son montant d'origine.
-  const outstanding = payments.filter(p => (p.type === "Promesse" || p.installmentPlan) && p.status !== "Validé" && paymentRemaining(p) > 0);
+  const outstanding = payments.filter(p => p.status === "Promis" && paymentRemaining(p) > 0);
   const outstandingAmount = outstanding.reduce((s, p) => s + paymentRemaining(p), 0);
   const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
@@ -1767,8 +1768,8 @@ function recordDetailBody(r) {
   if (state.tab === "Paiements") {
     const feed = recordLivePayments(r.id);
     const importedNote = r.importedAmount ? `<p class="muted-note">+ ${euro(r.importedAmount)} sur ${r.importedPaymentsCount || 0} paiement(s) historiques importés avant le CRM.</p>` : "";
-    // Chaque don/paiement peut être modifié (ex : passer une "Promesse" en
-    // "Validé" une fois l'argent effectivement reçu) ou supprimé, directement
+    // Chaque don/paiement peut être modifié (ex : passer son Statut de
+    // "Promis" à "Reçu" une fois l'argent effectivement arrivé) ou supprimé, directement
     // depuis cette liste — jusqu'ici impossible une fois le paiement ajouté.
     return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   }
@@ -2118,15 +2119,6 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
       if (target) copyFieldValue(target);
     });
   });
-  // Une "Promesse" (don pas encore reçu) doit se voir proposer un statut
-  // "En attente" par défaut plutôt que "Validé".
-  const typeSelect = dialogContent().querySelector('select[name="type"]');
-  const statusSelect = dialogContent().querySelector('select[name="status"]');
-  if (typeSelect && statusSelect) {
-    typeSelect.addEventListener("change", () => {
-      if (typeSelect.value === "Promesse") statusSelect.value = "En attente";
-    });
-  }
   // Le bloc "versements" (payé jusqu'ici / reste à payer / ajouter un
   // versement maintenant) ne veut rien dire tant que "Paiement échelonné"
   // n'est pas sur "Oui" : on ne l'affiche que dans ce cas, et on le
@@ -2149,12 +2141,12 @@ function openQuickForRecord(recordId, kind) {
   if (!r) return notify("Fiche introuvable");
   if (kind === "payment") return modalShell("payment", "Don pour " + r.name, "Ajouter un don / paiement",
     `${contactLockedField(r)}
-     ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], "Don")}
+     ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], "Don")}
      ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
      ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
      ${installmentFormSection(null)}
      ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-     ${selectField("Statut", "status", ["Validé","En attente"], "Validé")}
+     ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
      ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `${contactLockedField(r)}
@@ -2174,8 +2166,9 @@ function openQuickForRecord(recordId, kind) {
 }
 
 // Modifier un paiement existant : jusqu'ici seul l'ajout d'un nouveau
-// paiement était possible, donc corriger une erreur ou faire passer une
-// "Promesse" en "Validé" une fois le don reçu n'avait aucune solution.
+// paiement était possible, donc corriger une erreur ou faire passer un don
+// promis de "Promis" à "Reçu" une fois l'argent effectivement arrivé
+// n'avait aucune solution.
 function openEditPayment(id) {
   const p = payments.find(item => item.id === id);
   if (!p) return notify("Paiement introuvable");
@@ -2183,12 +2176,12 @@ function openEditPayment(id) {
   modalShell("editPayment", "Paiement", `Modifier le paiement de ${p.payer}`,
     `${r ? contactLockedField(r) : ""}
      <input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
-     ${selectField("Type", "type", ensureOption(["Don","Promesse","Adhésion","Billetterie"], p.type), p.type)}
+     ${selectField("Type", "type", ensureOption(["Don","Adhésion","Billetterie"], p.type), p.type)}
      ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], p.installmentPlan ? "Oui" : "Non")}
      ${field("Montant total (€)", "amount", p.amount, "number", "min='0' step='1' required")}
      ${installmentFormSection(p)}
      ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
-     ${selectField("Statut", "status", ensureOption(["Validé","En attente"], p.status), p.status)}
+     ${selectField("Statut", "status", ensureOption(["Reçu","Promis"], p.status), p.status)}
      ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
      ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
 }
@@ -2201,6 +2194,14 @@ function paymentPaidTotal(p) {
 }
 function paymentRemaining(p) {
   return Number(p.amount || 0) - paymentPaidTotal(p);
+}
+// Un don et une promesse sont la même chose, juste à un stade différent :
+// dès qu'un don passe "Reçu" (à la main, ou automatiquement parce que les
+// versements couvrent enfin tout le montant), il doit devenir éligible au
+// reçu fiscal tout seul — sans repasser par ce champ à la main en plus du
+// statut.
+function bumpReceiptIfReceived(p) {
+  if (p.type === "Don" && p.status === "Reçu" && p.receipt === "Non éligible") p.receipt = "À générer";
 }
 // Bloc "versements" affiché sous un paiement marqué "échelonné" : le total
 // déjà payé et le moyen utilisé pour chaque versement, le reste à payer
@@ -2250,7 +2251,7 @@ function applyInlineInstallment(p, data) {
   if (!Array.isArray(p.installments)) p.installments = [];
   p.installments.push({ id: nextId("VER", p.installments), date: todayStr(), amount: montant, method: data.newInstallmentMethod || p.method });
   logAudit(`Versement de ${euro(montant)} (${data.newInstallmentMethod || p.method}) ajouté pour ${p.payer} — ${p.type}.`);
-  if (paymentRemaining(p) <= 0) p.status = "Validé";
+  if (paymentRemaining(p) <= 0) { p.status = "Reçu"; bumpReceiptIfReceived(p); }
 }
 function paymentTimelineItem(p) {
   return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
@@ -2301,12 +2302,12 @@ function openModal(kind, options = {}) {
        ${field("Étiquettes", "tags", "", "text", "placeholder='Structure, Partenaire'")}`),
     payment: () => modalShell("payment", "Paiement", "Ajouter un paiement",
       `${pickerField("Payeur", "recordId", selected)}
-       ${selectField("Type", "type", ["Don","Promesse","Adhésion","Billetterie"], options.type || "Don")}
-       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], options.type === "Promesse" ? "Oui" : "Non")}
+       ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], options.type || "Don")}
+       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
        ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
        ${installmentFormSection(null)}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-       ${selectField("Statut", "status", ["Validé","En attente"], options.type === "Promesse" ? "En attente" : "Validé")}
+       ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
        ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
     account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
@@ -2360,7 +2361,7 @@ function submitForm(event) {
     payment: () => {
       const payer = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.payer);
       if (!payer) { notify("Payeur introuvable"); return; }
-      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: data.type === "Don" ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [] };
+      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: (data.type === "Don" && data.status === "Reçu") ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [] };
       payments.unshift(p);
       logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
       applyInlineInstallment(p, data);
@@ -2435,6 +2436,10 @@ function submitForm(event) {
       p.method = data.method;
       p.status = data.status;
       p.receipt = data.receipt;
+      // Un don et une promesse sont la même chose, juste à un stade
+      // différent : si on vient de repasser le Statut sur "Reçu" sans avoir
+      // pensé à changer le Reçu à la main, on l'ouvre automatiquement.
+      bumpReceiptIfReceived(p);
       if ("installmentPlan" in data) p.installmentPlan = data.installmentPlan === "Oui";
       if (p.installmentPlan && !Array.isArray(p.installments)) p.installments = [];
       p.occasion = splitTags(data.occasion);
@@ -2451,9 +2456,10 @@ function submitForm(event) {
       p.installments.push({ id: nextId("VER", p.installments), date: display, amount: montant, method: data.method });
       logAudit(`Versement de ${euro(montant)} (${data.method}) ajouté pour ${p.payer} — ${p.type}.`);
       // Une fois le montant total couvert par les versements, on considère
-      // le paiement réglé : ça évite d'avoir à repasser manuellement le
-      // statut en "Validé" en plus d'avoir ajouté le dernier versement.
-      if (paymentRemaining(p) <= 0) p.status = "Validé";
+      // le don reçu : ça évite d'avoir à repasser manuellement le statut sur
+      // "Reçu" en plus d'avoir ajouté le dernier versement — et ça ouvre le
+      // reçu fiscal du même coup.
+      if (paymentRemaining(p) <= 0) { p.status = "Reçu"; bumpReceiptIfReceived(p); }
       state.tab = "Paiements";
     },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
