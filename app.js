@@ -370,7 +370,7 @@ const apps = [
 const navTree = [
   ["home", "ACCUEIL", []],
   ["stats", "STATS", ["Vue d'ensemble"]],
-  ["crm", "CONTACTS", ["Contacts", "Structures", "Interactions", "Segments", "Groupes", "Liaisons"]],
+  ["crm", "CONTACTS", ["Contacts", "Structures", "Interactions", "Segments", "Groupes", "Liaisons", "Portefeuille"]],
   ["pay", "PAIEMENTS", ["Tous les paiements", "Dons", "Adhésions", "Billetterie", "Reçus"]],
   ["imports", "IMPORTS", []],
   ["apps", "APPLIS", ["Toutes les applis"]],
@@ -1119,6 +1119,7 @@ function hpPortfolioPanel() {
   const shown = list.slice(0, 8);
   return `<section class="hp-portfolio">
     <div class="hp-activity-head"><h2>Mon portefeuille</h2><span class="hp-tasks-count">${list.length ? (overdue ? `${overdue} à recontacter` : "Tout est à jour") : "Aucun contact suivi"}</span></div>
+    ${list.length ? `<button type="button" class="hp-link" data-action="goto-portfolio">Voir tout mon portefeuille</button>` : ""}
     ${list.length ? `<div class="hp-portfolio-list">${shown.map(hpPortfolioRow).join("")}</div>${list.length > shown.length ? `<p class="muted-note">+ ${list.length - shown.length} autre(s) contact(s) dans le portefeuille.</p>` : ""}`
       : `<p class="muted-note">Ajoutez les donateurs que vous suivez personnellement pour ne plus jamais en perdre un — l'objectif est un vrai contact au moins une fois par mois.</p>`}
     <button type="button" class="hp-link" data-action="add-to-portfolio">+ Ajouter un contact à mon portefeuille</button>
@@ -1441,7 +1442,48 @@ function crm() {
   if (state.section === "Groupes") return groupsView();
   if (state.section === "Interactions") return interactionsView();
   if (state.section === "Liaisons") return linkagesView();
+  if (state.section === "Portefeuille") return portfolioView();
   return recordsView(state.section === "Structures" ? "Structure" : state.section === "Contacts" ? "Contact" : null);
+}
+
+// Page dédiée "Portefeuille" (accessible depuis le menu CONTACTS) : liste
+// complète (pas seulement les 8 premiers comme sur l'accueil) des donateurs
+// suivis personnellement, avec les mêmes actions que le panneau d'accueil.
+// Ajoutée suite au retour d'Arié qui n'arrivait pas à trouver où voir/gérer
+// son portefeuille — un simple panneau sur l'accueil n'était pas assez
+// visible/complet ; ceci lui donne une vraie destination dans le menu.
+function portfolioView() {
+  const mine = myAgentCode();
+  const list = myPortfolioRecords()
+    .map(r => { const days = daysSincePortfolioContact(r); return { r, days, tone: portfolioTone(days) }; })
+    .sort((a, b) => PORTFOLIO_TONE_ORDER[a.tone] - PORTFOLIO_TONE_ORDER[b.tone] || (b.days ?? 99999) - (a.days ?? 99999));
+  const overdue = list.filter(x => x.tone === "never" || x.tone === "late").length;
+  return `<section class="panel pad">
+    <div class="toolbar clean">
+      <div>
+        <span class="eyebrow">Suivi personnalisé</span>
+        <h2>Mon portefeuille</h2>
+        <p class="muted-note">Identifié comme <strong>${escapeHtml(mine || "—")}</strong>${mine ? "" : " — aucun prénom sur votre compte, contactez un administrateur"} · ${list.length} contact${list.length > 1 ? "s" : ""} suivi${list.length > 1 ? "s" : ""}${overdue ? `, ${overdue} à recontacter` : ""}.</p>
+      </div>
+      ${action("+ Ajouter un contact à mon portefeuille", "add-to-portfolio", "primary-btn")}
+    </div>
+    ${list.length ? `<div class="hp-portfolio-list">${list.map(portfolioViewRow).join("")}</div>`
+      : emptyState("Aucun contact suivi pour l'instant. Ajoutez les donateurs que vous accompagnez personnellement, ou utilisez le champ « Portefeuille » sur une fiche.", "+ Ajouter un contact à mon portefeuille", "add-to-portfolio")}
+  </section>`;
+}
+function portfolioViewRow({ r, days, tone }) {
+  const label = tone === "never" ? "Jamais contacté depuis l'utilisation du CRM" : `Dernier contact il y a ${days} jour${days > 1 ? "s" : ""}`;
+  const amount = recordTotalAmount(r);
+  return `<div class="hp-portfolio-row">
+    <button type="button" class="hp-portfolio-main" data-action="open-record:${r.id}:Activité">
+      <span class="hp-portfolio-dot hp-portfolio-dot-${tone}"></span>
+      <span class="hp-portfolio-info"><strong>${escapeHtml(r.name)}</strong><span class="hp-portfolio-meta">${amount ? euro(amount) + " donnés · " : ""}${label}</span></span>
+    </button>
+    <div class="hp-portfolio-row-actions">
+      ${action("Enregistrer un contact", `portfolio-touch:${r.id}`, "primary-btn")}
+      ${action("Retirer", `toggle-portfolio:${r.id}`)}
+    </div>
+  </div>`;
 }
 
 function recordsView(kind) {
@@ -2048,6 +2090,7 @@ function handleAction(key) {
     "goto-receipts": () => navigate("pay", "Reçus"),
     "goto-interactions": () => navigate("crm", "Interactions"),
     "goto-contacts": () => navigate("crm", "Contacts"),
+    "goto-portfolio": () => navigate("crm", "Portefeuille"),
     "goto-audit": () => navigate("admin", "Journal d'activité"),
   };
   (actions[key] || (() => notify("Fonctionnalité à venir")))();
