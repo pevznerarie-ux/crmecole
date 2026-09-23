@@ -796,6 +796,13 @@ function setHeader() {
   const [title, subtitle] = titles[state.view];
   viewTitle().textContent = state.section === title.toUpperCase() ? title : state.section;
   viewSubtitle().textContent = subtitle;
+  // Sur l'Accueil, ce bandeau générique ("Accueil" / "Vue générale...") ne
+  // sert à rien : la page a déjà son propre en-tête juste en dessous
+  // ("Bonjour, ..."), avec la date et les actions rapides. On ne le masque
+  // que pour cette page — les autres vues (Contacts, Paiements...) n'ont pas
+  // de gros titre à elles et en ont toujours besoin.
+  const topbarEl = document.querySelector(".topbar");
+  if (topbarEl) topbarEl.classList.toggle("topbar-hidden", state.view === "home");
 }
 
 function metric(label, value, note) {
@@ -815,8 +822,17 @@ function toolbar(placeholder = "Rechercher un nom, un email ou une ville") {
 function home() {
   const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   const missingEmail = records.filter(r => !r.email).length;
-  const pendingPromises = payments.filter(p => p.type === "Promesse" && p.status !== "Validé");
-  const pendingPromisesAmount = pendingPromises.reduce((s, p) => s + Number(p.amount || 0), 0);
+  // "Reste à payer" ne porte que sur les Promesses et les paiements
+  // échelonnés (les seuls dont on suit vraiment un solde restant) : les dons
+  // historiques importés utilisent des libellés de statut très divers
+  // ("Paiement validé", "Chèque encaissé"...) qui ne veulent pas dire
+  // "en attente" même s'ils ne s'écrivent pas exactement "Validé" — les
+  // inclure ferait passer presque tout l'historique pour "restant à payer".
+  // Tient compte des versements déjà reçus sur un paiement échelonné : une
+  // Promesse de 7 700 € dont 5 000 € sont déjà arrivés ne compte plus que
+  // pour 2 700 € restants, pas pour son montant d'origine.
+  const outstanding = payments.filter(p => (p.type === "Promesse" || p.installmentPlan) && p.status !== "Validé" && paymentRemaining(p) > 0);
+  const outstandingAmount = outstanding.reduce((s, p) => s + paymentRemaining(p), 0);
   const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
   const now = new Date();
@@ -840,10 +856,8 @@ function home() {
         </div>
       </header>
 
-      <section class="hp-stats">
-        ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
-        ${hpStat("Promesses en attente", euro(pendingPromisesAmount), pendingPromises.length ? `${pendingPromises.length} promesse(s) à encaisser` : "Aucune promesse en attente")}
-        ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
+      <section class="hp-stats hp-stats-2col">
+        ${hpStat("Reste à payer", euro(outstandingAmount), outstanding.length ? `${outstanding.length} paiement(s) à encaisser` : "Rien en attente")}
         ${hpStat("Tâches en retard", lateTasks.length.toLocaleString("fr-FR"), lateTasks.length ? "À traiter en priorité" : "Rien en retard")}
       </section>
 
@@ -860,6 +874,14 @@ function home() {
         <div class="hp-activity-head"><h2>Activité récente</h2><button type="button" class="hp-link" data-action="goto-interactions">Voir tout</button></div>
         <div class="hp-timeline">${recentInteractions.map(i => hpActivityItem(i)).join("")}</div>
       </section>` : ""}
+
+      <section class="hp-activity hp-admin">
+        <div class="hp-activity-head"><h2>Vue d'ensemble</h2><span class="hp-admin-tag">Administration générale</span></div>
+        <div class="hp-stats hp-stats-2col hp-stats-boxed">
+          ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
+          ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
+        </div>
+      </section>
     </div>`;
 }
 
