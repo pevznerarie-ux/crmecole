@@ -498,10 +498,18 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 }
 
 @media (max-width: 720px) {
-  .topbar { flex-direction: column; align-items: stretch; padding: 14px 16px; }
+  /* Sur l'app installée en PWA (écran d'accueil), la barre de statut du
+     téléphone (heure, réseau, batterie) est superposée en transparence sur le
+     haut de la page au lieu de lui laisser de la place. Sans cette marge de
+     sécurité (env(safe-area-inset-top)), le texte tout en haut — le bandeau
+     "Contacts"/"Paiements" ici, ou l'accroche "LES INSTITUTIONS SINAÏ" de
+     l'accueil quand ce bandeau est masqué — se retrouve caché derrière
+     l'heure et les icônes du téléphone. */
+  .topbar { flex-direction: column; align-items: stretch; padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 14px; }
   .top-actions { display: none; }
   .nav-toggle { display: none; }
   .content { padding: 16px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
+  .topbar.topbar-hidden + .content { padding-top: calc(16px + env(safe-area-inset-top, 0px)); }
   nav, .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid, .field-grid, .form-grid, .quick-grid, .command-stats { grid-template-columns: 1fr; }
   .workspace-hero { grid-template-columns: 1fr; }
   .workspace-hero h2 { font-size: 30px; }
