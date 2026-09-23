@@ -27,6 +27,7 @@
   --hp-ink: #2a231d;
   --hp-muted: #7d7167;
   --hp-line: #e9decf;
+  --hp-display: "Fraunces", "Iowan Old Style", Georgia, serif;
   --success: #059669;
   --success-soft: #ecfdf5;
   --warn: #d97706;
@@ -400,6 +401,22 @@ input, select, textarea { min-height: 40px; padding: 8px 11px; border: 1px solid
 textarea { min-height: 94px; max-height: 94px; resize: none; overflow-y: auto; }
 input[readonly], .field-locked { background: var(--surface-alt); color: var(--muted); cursor: default; }
 .span-2 { grid-column: span 2; }
+
+/* Les fenêtres "Ajouter/Modifier..." (dialog/.modal) utilisaient un blanc et
+   des gris neutres qui détonnaient à côté de l'identité chaleureuse de
+   l'accueil (crème, Fraunces, terracotta arrondi). On reprend ici les mêmes
+   tons et la même typographie de titre pour que "les autres fenêtres" de
+   l'app aient un air de famille avec l'accueil, sans toucher au reste des
+   écrans (tableaux, réglages...) qui gardent leur look dense habituel. */
+dialog { background: var(--hp-surface); border-radius: 18px; }
+.modal header, .modal footer { background: var(--hp-surface); }
+.modal footer { border-top: 1px solid var(--hp-line); }
+.modal header h2 { font-family: var(--hp-display); font-weight: 600; letter-spacing: -.01em; }
+.modal .eyebrow { letter-spacing: .14em; }
+.modal label { color: var(--hp-muted); }
+.modal input, .modal select, .modal textarea { border-color: var(--hp-line); background: #fffefb; }
+.modal footer button { border-radius: 999px; padding: 0 20px; }
+.modal footer .primary-btn { box-shadow: 0 6px 16px rgba(168, 83, 44, .25); }
 
 .splash {
   position: fixed;
@@ -916,4 +933,28 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
      à la ligne suivante (basis 100%) plutôt que de laisser le dernier
      bouton déborder hors de l'écran, invisible et impossible à toucher. */
   .hp-task-controls { flex: 1 1 100%; justify-content: flex-end; }
+}
+
+/* Sous iOS/Safari (et la plupart des navigateurs mobiles), un champ de
+   saisie dont la taille de police calculée est inférieure à 16px fait
+   automatiquement "zoomer" toute la page dès qu'on clique dedans pour
+   écrire, pour rendre le texte lisible — et elle ne redescend pas toujours
+   proprement au zoom d'origine une fois qu'on ressort du champ. D'où
+   l'impression que "la page s'agrandit" à chaque fois qu'on commence à
+   taper. Nos champs héritaient la police des étiquettes de formulaire
+   (12-13px), bien en dessous du seuil : ils étaient tous concernés
+   (connexion, toutes les fenêtres "Ajouter/Modifier...", recherche de
+   contact, tâches...). On force donc 16px sur tous les champs de saisie
+   dès qu'on est sur un écran tactile (pointer: coarse, qui couvre
+   téléphone ET tablette quelle que soit la largeur d'écran) — l'affichage
+   desktop/souris, plus dense, ne change pas. Placé en toute fin de fichier
+   pour l'emporter sur les tailles de police plus spécifiques déclarées
+   plus haut (ex. les champs de la liste de tâches). */
+@media (pointer: coarse) {
+  input, select, textarea,
+  .hp-task-input-wrap input[type="text"],
+  .hp-task-form input[type="date"],
+  .hp-task-date {
+    font-size: 16px;
+  }
 }
