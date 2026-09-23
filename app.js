@@ -268,6 +268,7 @@ function currentCrmData() {
     state: { selectedRecord: state.selectedRecord },
     records, payments, imports, users, groups, interactions, linkages,
     customFields, receiptTemplates, savedViews, auditLog, interactionCategories, tasks,
+    holidayNotes,
   };
 }
 
@@ -355,6 +356,10 @@ let auditLog = [];
 // Arié, affichée pour l'instant en aperçu sur l'accueil (calendrier complet,
 // synchro téléphone et rappels de fêtes = phase suivante, discutée à part).
 let tasks = [];
+// Brouillon d'idée/message pour chaque occurrence de fête juive (clé =
+// JEWISH_HOLIDAYS[].key), pour pouvoir le retravailler et l'affiner au fil
+// du temps au lieu de repartir d'un message figé à chaque fois.
+let holidayNotes = {};
 
 const apps = [
   ["HelloAsso", "Collecter"], ["Stripe", "Collecter"], ["GoCardless", "Collecter"], ["iRaiser", "Collecter"],
@@ -981,21 +986,41 @@ function upcomingHolidays(count = 3) {
     .slice(0, count)
     .map(h => ({ ...h, daysLeft: daysBetweenIso(today, h.date) }));
 }
+// Pose un rappel de lui-même dès qu'une fête entre dans une fenêtre utile
+// (30 jours), sans attendre un clic : une tâche "Réfléchir à une idée pour
+// X" apparaît directement dans les tâches, reliée à la fête (t.holidayKey)
+// pour ne jamais la recréer en double. Cliquer sur cette tâche (ou sur la
+// fête elle-même) ouvre la même case à idée, déjà pré-remplie d'un point de
+// départ à retravailler — pas un message figé à copier tel quel.
+function ensureHolidayReminders() {
+  const today = todayIso();
+  let created = false;
+  upcomingHolidays(3).forEach(h => {
+    if (h.daysLeft > 30) return;
+    if (tasks.some(t => t.holidayKey === h.key)) return;
+    const t = buildTask(`Réfléchir à une idée pour ${h.name}`, today, null);
+    if (!t) return;
+    t.holidayKey = h.key;
+    tasks.unshift(t);
+    created = true;
+  });
+  return created;
+}
 function hpHolidayPanel() {
   const upcoming = upcomingHolidays(3);
   if (!upcoming.length) return "";
   return `<section class="hp-holidays">
-    <div class="hp-activity-head"><h2>Stratégie des fêtes</h2><span class="hp-tasks-count">Prochaine dans ${upcoming[0].daysLeft <= 0 ? "0 j" : `${upcoming[0].daysLeft} j`}</span></div>
+    <div class="hp-activity-head"><h2>Idées pour les fêtes</h2><span class="hp-tasks-count">Prochaine dans ${upcoming[0].daysLeft <= 0 ? "0 j" : `${upcoming[0].daysLeft} j`}</span></div>
     <div class="hp-holiday-list">
       ${upcoming.map(h => `<div class="hp-holiday-row">
         <div class="hp-holiday-main">
           <span class="hp-holiday-emoji">${h.emoji}</span>
           <div>
             <strong>${escapeHtml(h.name)}</strong>
-            <span class="hp-holiday-date">${formatFrDate(h.date)} · ${h.daysLeft <= 0 ? "aujourd'hui" : `dans ${h.daysLeft} jour${h.daysLeft > 1 ? "s" : ""}`}</span>
+            <span class="hp-holiday-date">${formatFrDate(h.date)} · ${h.daysLeft <= 0 ? "aujourd'hui" : `dans ${h.daysLeft} jour${h.daysLeft > 1 ? "s" : ""}`} · ${holidayNotes[h.key]?.note ? "idée déjà notée" : "pas encore d'idée"}</span>
           </div>
         </div>
-        ${action("Préparer la relance", `holiday-prepare:${h.key}`, "primary-btn")}
+        ${action("Travailler l'idée", `holiday-prepare:${h.key}`, "primary-btn")}
       </div>`).join("")}
     </div>
   </section>`;
@@ -1008,16 +1033,14 @@ function openHolidayModal(key) {
   if (!h) return notify("Fête introuvable");
   const tpl = HOLIDAY_TEMPLATES[h.templateKey];
   if (!tpl) return notify("Modèle introuvable");
-  modalShell("holidayTask", "Stratégie des fêtes", `Préparer ${h.name}`,
+  const saved = holidayNotes[h.key]?.note;
+  const seed = saved || tpl.sms;
+  modalShell("holidayTask", "Idées pour les fêtes", `${h.name} — une idée à affiner`,
     `<input type="hidden" name="holidayKey" value="${escapeHtml(h.key)}">
      <div class="span-2 holiday-strategy-tip">💡 ${escapeHtml(tpl.strategy)}</div>
-     <label class="span-2">Objet de l'email<input type="text" readonly id="holidayEmailSubject" value="${escapeHtml(tpl.emailSubject)}"></label>
-     <div class="span-2 copy-row">${copyButton("Copier l'objet", "holidayEmailSubject")}</div>
-     <label class="span-2">Corps de l'email<textarea readonly id="holidayEmailBody" class="holiday-textarea">${escapeHtml(tpl.emailBody)}</textarea></label>
-     <div class="span-2 copy-row">${copyButton("Copier l'email", "holidayEmailBody")}</div>
-     <label class="span-2">Message court (SMS / WhatsApp)<textarea readonly id="holidaySmsBody" class="holiday-textarea holiday-textarea-sms">${escapeHtml(tpl.sms)}</textarea></label>
-     <div class="span-2 copy-row">${copyButton("Copier le message", "holidaySmsBody")}</div>`,
-    "Créer une tâche de relance");
+     <label class="span-2">Votre idée ou message — un point de départ à retravailler à votre façon, parfois quelques lignes suffisent<textarea name="note" id="holidayIdeaNote" class="holiday-textarea">${escapeHtml(seed)}</textarea></label>
+     <div class="span-2 copy-row">${copyButton("Copier", "holidayIdeaNote")}</div>`,
+    "Enregistrer mon idée");
 }
 function copyFieldValue(el) {
   const text = el.value;
@@ -1199,6 +1222,7 @@ function hpTaskRow(t) {
     <div class="hp-task-main">
       <span class="hp-task-title">${escapeHtml(t.title)}</span>
       ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
+      ${t.holidayKey ? `<button type="button" class="hp-task-contact-chip" data-action="holiday-prepare:${t.holidayKey}" title="Ouvrir la case idée">💡 Idée</button>` : ""}
     </div>
     <div class="hp-task-controls">
       <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
@@ -2341,12 +2365,9 @@ function submitForm(event) {
     holidayTask: () => {
       const h = JEWISH_HOLIDAYS.find(x => x.key === data.holidayKey);
       if (!h) { notify("Fête introuvable"); return; }
-      const due = daysBeforeIso(h.date, 5);
-      const t = buildTask(`Envoyer les vœux de ${h.name} au portefeuille`, due, null);
-      if (!t) return;
-      tasks.unshift(t);
-      logAudit(`Tâche de relance créée pour ${h.name}.`);
-      state.tab = "Tâches";
+      holidayNotes[h.key] = { note: (data.note || "").trim(), updatedAt: nowIso() };
+      ensureHolidayReminders(); // au cas où le rappel n'existerait pas encore
+      logAudit(`Idée notée pour ${h.name}.`);
     },
     portfolioTouch: () => {
       const rec = recordById(data.recordId);
@@ -2722,11 +2743,15 @@ async function bootApp() {
     auditLog = Array.isArray(backup.auditLog) ? backup.auditLog : auditLog;
     interactionCategories = Array.isArray(backup.interactionCategories) && backup.interactionCategories.length ? backup.interactionCategories : interactionCategories;
     tasks = Array.isArray(backup.tasks) ? backup.tasks : tasks;
+    holidayNotes = (backup.holidayNotes && typeof backup.holidayNotes === "object") ? backup.holidayNotes : holidayNotes;
     if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
       state.selectedRecord = backup.state.selectedRecord;
     }
   }
   if (!state.selectedRecord && records.length) state.selectedRecord = records[0].id;
+  // Pose déjà un rappel dès qu'une fête approche (pas besoin de cliquer un
+  // bouton pour y penser) : voir ensureHolidayReminders plus haut.
+  if (ensureHolidayReminders()) saveCrmData();
   state.booted = true;
   render();
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
