@@ -1,1 +1,5 @@
-# Standard-library only app. This file lets Railway detect Python.
+# App standard-library uniquement, sauf pour la génération du PDF du reçu
+# fiscal CERFA (2041-RD) : fpdf2 (pur Python, aucune dépendance système) pour
+# la mise en page, num2words pour écrire le montant en toutes lettres.
+fpdf2==2.8.8
+num2words==0.5.14

@@ -1632,12 +1632,13 @@ function receipts() {
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
   return `<div class="split"><section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Générer les reçus manquants", "generate-receipts", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
     ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p>
-    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th></tr></thead><tbody>${visible.map(p=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
-    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}:Paiements">
+    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th><th>PDF</th></tr></thead><tbody>${visible.map(p=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td><td>${p.receiptNumber ? action("Télécharger", `download-receipt-pdf:${p.id}`) : "-"}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <div class="record-cards mobile-only">${visible.map(p => `<div class="record-card" data-action="open-record:${p.recordId}:Paiements">
       <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
       <p>${p.receiptNumber || "Pas encore de numéro"}</p>
       <div class="chip-list">${status(p.receipt)}</div>
-    </button>`).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
+      ${p.receiptNumber ? `<div class="row-actions">${action("Télécharger le PDF", `download-receipt-pdf:${p.id}`)}</div>` : ""}
+    </div>`).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
     </section><section class="panel pad">
       <span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2>
       <div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>
@@ -1949,7 +1950,7 @@ function bind() {
     closeNav();
     render();
   }));
-  document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", () => handleAction(el.dataset.action)));
+  document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); handleAction(el.dataset.action); }));
   document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details"; render(); scrollToTop(); }));
   document.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
   document.querySelectorAll("[data-category-index]").forEach(el => {
@@ -2080,6 +2081,7 @@ function handleAction(key) {
     }
     return;
   }
+  if (key.startsWith("download-receipt-pdf:")) return downloadReceiptPdf(key.split(":")[1]);
   if (key.startsWith("quick-interaction:")) return openQuickForRecord(key.split(":")[1], "interaction");
   if (key.startsWith("quick-payment:")) return openQuickForRecord(key.split(":")[1], "payment");
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
@@ -2273,10 +2275,90 @@ function nextReceiptNumber() {
   const next = (used.length ? Math.max(...used) : 0) + 1;
   return `${prefix}${String(next).padStart(4, "0")}`;
 }
-// Entité émettrice par défaut le temps qu'Arié envoie le modèle CERFA exact
-// utilisé par l'association (nom, adresse, SIREN, signataire...). À
-// remplacer dès que ce document est en main.
-const DEFAULT_RECEIPT_ENTITY = "Réseau Sinaï";
+// Identité de l'entité émettrice du reçu fiscal CERFA, telle qu'elle figure
+// sur le modèle utilisé par Les Institutions Sinaï (reçu n° A2026/00148,
+// article 200/238bis/978 du CGI). Cas exceptionnel d'entité différente pour
+// un don en particulier : voir la note de l'action "generate-receipts".
+const RECEIPT_ENTITY = {
+  name: "Les Institutions Sinaï",
+  siren: "W751175124",
+  address: "2 Rue Tristan Tzara, 75018 Paris",
+  objet: "Association d'intérêt général, éducative, sociale et culturelle",
+  qualite: "Œuvre ou organisme d'intérêt général",
+  signatoryName: "Joseph Pevzner",
+  signatoryTitle: "Le Président Adjoint",
+};
+// Libellés CERFA du mode de versement, à partir du moyen enregistré dans le CRM.
+const RECEIPT_METHOD_LABELS = { "CB": "Carte bancaire", "Chèque": "Chèque", "Virement": "Virement bancaire", "SEPA": "Prélèvement SEPA", "Espèces": "Espèces" };
+// "NOM OU DENOMINATION" du donateur tel qu'attendu sur le CERFA : civilité +
+// nom en majuscules pour un particulier, raison sociale telle quelle pour
+// une structure (personne morale).
+function receiptDonorName(record) {
+  if (!record) return "";
+  if (record.kind === "Structure") return record.name || "";
+  const civ = record.civility ? `${record.civility} ` : "";
+  return `${civ}${(record.name || "").toUpperCase()}`;
+}
+// "ADRESSE DONATEUR" : adresse, puis code postal + ville en majuscules,
+// exactement comme sur le modèle papier.
+function receiptDonorAddress(record) {
+  if (!record) return "";
+  const parts = [];
+  if (record.address) parts.push(record.address);
+  const cityLine = [record.zip, (record.city || "").toUpperCase()].filter(Boolean).join(" ");
+  if (cityLine) parts.push(cityLine);
+  return parts.join(", ");
+}
+// Article du CGI à cocher : réduction d'impôt sur le revenu pour un
+// particulier (200 du CGI), mécénat d'entreprise pour une structure (238 bis
+// du CGI). Pas encore de cas IFI (978 du CGI) dans le CRM.
+function receiptArticleCgi(record) {
+  return record && record.kind === "Structure" ? "238bis" : "200";
+}
+// Date complète en toutes lettres ("27 avril 2026") attendue dans le bloc
+// "Date et signature" du CERFA.
+function formatFrDateLong(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
+}
+// Génère le PDF du reçu CERFA côté serveur (mise en page + montant en
+// toutes lettres) et déclenche son téléchargement. Le numéro de reçu doit
+// déjà avoir été attribué (bouton "Générer les reçus manquants" ou
+// bascule automatique en "Reçu").
+async function downloadReceiptPdf(paymentId) {
+  const p = payments.find(item => item.id === paymentId);
+  if (!p) { notify("Paiement introuvable"); return; }
+  if (!p.receiptNumber) { notify("Générez d'abord le reçu (numéro pas encore attribué)"); return; }
+  const record = recordById(p.recordId);
+  const payloadBody = {
+    receiptNumber: p.receiptNumber,
+    entity: RECEIPT_ENTITY,
+    donorName: receiptDonorName(record) || p.payer,
+    donorAddress: receiptDonorAddress(record),
+    amount: p.amount,
+    articleCgi: receiptArticleCgi(record),
+    modeVersement: RECEIPT_METHOD_LABELS[p.method] || p.method || "-",
+    dateLong: formatFrDateLong(p.status === "Reçu" ? (p.paymentDate || p.promiseDate) : p.promiseDate) || todayStr(),
+  };
+  try {
+    const res = await fetch(`${API_BASE}/api/receipt-pdf`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payloadBody),
+    });
+    if (!res.ok) throw new Error("Échec de génération du PDF");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `recu-${p.receiptNumber}.pdf`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (err) {
+    notify("Impossible de générer le PDF du reçu");
+  }
+}
 // Enregistre une (re)génération de reçu : attribue le numéro s'il n'existe
 // pas encore, marque le paiement "Généré", et ajoute une ligne au suivi
 // comptable pour l'expert-comptable — y compris pour une simple

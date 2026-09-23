@@ -9,6 +9,9 @@ import secrets
 import sqlite3
 import uuid
 
+from fpdf import FPDF
+from num2words import num2words
+
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("DATA_DIR") or ("/data" if Path("/data").exists() else ROOT))
@@ -514,6 +517,226 @@ def rebuild_state_backup(db):
     persist_json_backup(data)
 
 
+# ---------- Génération du reçu fiscal (CERFA 2041-RD) ----------------------
+# Reproduit le contenu du modèle papier utilisé jusqu'ici par Les Institutions
+# Sinaï (précédemment généré via un prestataire externe) : mêmes rubriques,
+# mêmes mentions légales, même ordre. Le PDF est construit à la demande à
+# partir des données envoyées par le client (app.js) — le serveur ne stocke
+# rien de plus que ce qui existe déjà dans le CRM (payments/records).
+LOGO_PATH = ROOT / "assets" / "logo-sinai.png"
+
+
+def amount_in_words_fr(amount):
+    """Ex: 52 -> 'cinquante-deux euros', 52.5 -> 'cinquante-deux euros et
+    cinquante centimes'. Utilisé sur le reçu fiscal, qui doit indiquer le
+    montant en toutes lettres en plus des chiffres."""
+    amount = round(float(amount or 0), 2)
+    euros = int(amount)
+    centimes = round((amount - euros) * 100)
+    words = num2words(euros, lang="fr")
+    text = f"{words} {'euro' if euros == 1 else 'euros'}"
+    if centimes:
+        text += f" et {num2words(centimes, lang='fr')} {'centime' if centimes == 1 else 'centimes'}"
+    return text
+
+
+def build_cerfa_pdf(payload):
+    entity = payload.get("entity") or {}
+    receipt_number = str(payload.get("receiptNumber") or "")
+    donor_name = str(payload.get("donorName") or "")
+    donor_address = str(payload.get("donorAddress") or "")
+    amount = payload.get("amount") or 0
+    article_cgi = payload.get("articleCgi") or "200"  # "200" | "238bis" | "978"
+    mode_versement = str(payload.get("modeVersement") or "-")
+    date_long = str(payload.get("dateLong") or "")
+
+    pdf = FPDF(format="A4", unit="mm")
+    pdf.set_auto_page_break(auto=False)
+    pdf.add_font("DejaVu", "", str(ROOT / "assets" / "fonts" / "DejaVuSans.ttf"))
+    pdf.add_font("DejaVu", "B", str(ROOT / "assets" / "fonts" / "DejaVuSans-Bold.ttf"))
+    pdf.add_font("DejaVu", "I", str(ROOT / "assets" / "fonts" / "DejaVuSans-Oblique.ttf"))
+    pdf.add_page()
+    pdf.set_margins(12, 12, 12)
+    page_w = pdf.w - 24  # largeur utile entre les marges
+
+    right_col_w = 62
+    right_col_x = 12 + page_w - right_col_w
+
+    # ---- En-tête : référence CERFA officielle + titre + n° de reçu -------
+    pdf.set_xy(12, 12)
+    pdf.set_font("DejaVu", "B", 9)
+    pdf.multi_cell(35, 4, "2041-RD\nCERFA\nN° 11580*05", align="L")
+
+    pdf.set_xy(47, 12)
+    pdf.set_font("DejaVu", "B", 10.5)
+    pdf.multi_cell(
+        page_w - 35 - right_col_w, 4.4,
+        "Reçu des dons et versements effectués par les particuliers "
+        "au titre des articles 200 et 978 du code général des impôts",
+        align="C",
+    )
+
+    pdf.set_xy(right_col_x, 12)
+    pdf.set_font("DejaVu", "", 8)
+    pdf.multi_cell(right_col_w, 4, "N° d'ordre du reçu", align="R")
+    pdf.set_xy(right_col_x, 16.5)
+    pdf.set_font("DejaVu", "B", 10)
+    pdf.multi_cell(right_col_w, 4.5, receipt_number, align="R")
+
+    y = 32
+    # ---- Logo émetteur (gauche) + bloc adresse du donateur (droite, pour
+    # une éventuelle mise sous pli fenêtre) ---------------------------------
+    if LOGO_PATH.exists():
+        try:
+            pdf.image(str(LOGO_PATH), x=12, y=y, w=32)
+        except Exception:
+            pass
+    pdf.set_xy(right_col_x, y)
+    pdf.set_font("DejaVu", "B", 10)
+    pdf.multi_cell(right_col_w, 5, donor_name, align="R")
+    address_bottom = pdf.get_y()
+    pdf.set_font("DejaVu", "", 9)
+    for line in donor_address.split(", "):
+        pdf.set_x(right_col_x)
+        pdf.multi_cell(right_col_w, 4.6, line, align="R")
+        address_bottom = pdf.get_y()
+
+    y = max(y + 32, address_bottom + 4)
+
+    def section_bar(label, y):
+        pdf.set_xy(12, y)
+        pdf.set_fill_color(224, 224, 224)
+        pdf.set_font("DejaVu", "B", 9.5)
+        pdf.cell(page_w, 6.5, label, border=1, align="C", fill=True)
+        return y + 6.5
+
+    def kv_row(label, value, y, bold_value=True):
+        pdf.set_xy(14, y)
+        pdf.set_font("DejaVu", "", 9)
+        pdf.cell(58, 5.6, label, align="L")
+        pdf.set_font("DejaVu", "B" if bold_value else "", 9)
+        pdf.set_x(72)
+        pdf.multi_cell(page_w - 60, 5.6, value or "-", align="L")
+        return y + 5.8
+
+    # ---- BENEFICIAIRE DU DON ----------------------------------------------
+    y = section_bar("BENEFICIAIRE DU DON", y)
+    box_top = y
+    y = kv_row("NOM OU DENOMINATION :", entity.get("name", ""), y)
+    y = kv_row("Numéro SIREN ou RNA :", entity.get("siren", ""), y)
+    y = kv_row("ADRESSE ASSOCIATION :", entity.get("address", ""), y)
+    y = kv_row("OBJET :", entity.get("objet", ""), y, bold_value=False)
+    y = kv_row("QUALITE DE L'ORGANISME :", entity.get("qualite", ""), y, bold_value=False)
+    pdf.rect(12, box_top, page_w, y - box_top)
+    y += 3
+
+    pdf.set_xy(12, y)
+    pdf.set_font("DejaVu", "", 9.5)
+    pdf.multi_cell(
+        page_w, 5,
+        "Le bénéficiaire reconnaît avoir reçu au titre des dons et versements "
+        "ouvrant droit à réduction d'impôt, la somme de", align="L",
+    )
+    y = pdf.get_y() + 3
+
+    amount_str = f"{amount:g}" if float(amount) == int(amount) else f"{amount:.2f}".replace(".", ",")
+    amount_line = f"***{amount_str} Euros*** {amount_in_words_fr(amount)}"
+    # Réduit progressivement la police si le montant en toutes lettres est
+    # trop long pour tenir sur une seule ligne (gros dons, longues sommes).
+    font_size = 11
+    pdf.set_font("DejaVu", "B", font_size)
+    while pdf.get_string_width(amount_line) > page_w - 6 and font_size > 7:
+        font_size -= 0.5
+        pdf.set_font("DejaVu", "B", font_size)
+    pdf.set_xy(12, y)
+    pdf.multi_cell(page_w, 7, amount_line, border=1, align="C")
+    y = pdf.get_y() + 5
+
+    # ---- DONATEUR ----------------------------------------------------------
+    y = section_bar("DONATEUR", y)
+    box_top = y
+    y = kv_row("NOM OU DENOMINATION :", donor_name, y)
+    y = kv_row("ADRESSE DONATEUR :", donor_address, y)
+    pdf.rect(12, box_top, page_w, y - box_top)
+    y += 5
+
+    pdf.set_xy(12, y)
+    pdf.set_font("DejaVu", "B", 9.5)
+    pdf.multi_cell(
+        page_w, 4.6,
+        "Le bénéficiaire certifie sur l'honneur que les dons et versements qu'il reçoit\n"
+        "ouvrent droit à la réduction d'impôt prévue à l'article", align="C",
+    )
+    y += 10
+
+    def checkbox_row(y, items, checked_key, cols=None):
+        cols = cols or len(items)
+        col_w = page_w / cols
+        for i, (key, label) in enumerate(items):
+            col = i % cols
+            row = i // cols
+            x = 12 + col * col_w
+            row_y = y + row * 8
+            pdf.rect(x, row_y, 3.6, 3.6)
+            if key == checked_key:
+                pdf.set_xy(x, row_y - 0.6)
+                pdf.set_font("DejaVu", "B", 9)
+                pdf.cell(3.6, 4.6, "X", align="C")
+            pdf.set_xy(x + 5, row_y - 0.8)
+            pdf.set_font("DejaVu", "", 8.5)
+            pdf.cell(col_w - 5, 4.6, label)
+        rows = -(-len(items) // cols)  # arrondi au supérieur
+        return y + rows * 8
+
+    y = checkbox_row(y, [("200", "200 du CGI"), ("238bis", "238 bis du CGI"), ("978", "978 du CGI")], article_cgi)
+
+    pdf.set_xy(12, y)
+    pdf.set_font("DejaVu", "B", 9)
+    pdf.cell(page_w, 5, "Forme du don", align="L")
+    y += 6
+    y = checkbox_row(
+        y,
+        [("acte_authentique", "Acte authentique"), ("acte_seing_prive", "Acte sous seing privé"),
+         ("don_manuel", "Déclaration de don manuel"), ("autre_forme", "Autres")],
+        "don_manuel",
+        cols=2,
+    )
+
+    pdf.set_xy(12, y)
+    pdf.set_font("DejaVu", "B", 9)
+    pdf.cell(page_w, 5, "Nature du don", align="L")
+    y += 6
+    y = checkbox_row(
+        y,
+        [("numeraire", "Numéraire"), ("titres", "Titres de sociétés cotées"), ("autre_nature", "Autres")],
+        "numeraire",
+    )
+
+    y += 6
+    pdf.line(12, y, 12 + page_w, y)
+    y += 5
+    pdf.set_xy(12, y)
+    pdf.set_font("DejaVu", "", 9.5)
+    pdf.cell(page_w / 2, 5, f"Mode de versement : {mode_versement}")
+    pdf.set_xy(12 + page_w / 2, y)
+    pdf.set_font("DejaVu", "", 9.5)
+    pdf.cell(page_w / 2, 5, "Date et signature", align="R")
+    y += 6
+    pdf.set_xy(12 + page_w / 2, y)
+    pdf.set_font("DejaVu", "B", 9.5)
+    pdf.cell(page_w / 2, 5, date_long, align="R")
+    y += 7
+    pdf.set_xy(12 + page_w / 2, y)
+    pdf.set_font("DejaVu", "I", 9)
+    pdf.cell(page_w / 2, 5, entity.get("signatoryName", ""), align="R")
+    y += 4.5
+    pdf.set_xy(12 + page_w / 2, y)
+    pdf.set_font("DejaVu", "", 8)
+    pdf.cell(page_w / 2, 5, entity.get("signatoryTitle", ""), align="R")
+
+    return bytes(pdf.output())
+
+
 class SinaiCrmHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -686,6 +909,17 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         if not account:
             return
 
+        if path == "/api/receipt-pdf":
+            try:
+                payload = self.read_json()
+                pdf_bytes = build_cerfa_pdf(payload)
+            except Exception as exc:
+                self.send_error_json(400, f"Impossible de générer le PDF : {exc}")
+                return
+            number = (payload.get("receiptNumber") or "recu").replace("/", "-")
+            self.send_pdf(pdf_bytes, f"recu-{number}.pdf")
+            return
+
         if path == "/api/state":
             if account["profile"] == "Lecture seule":
                 self.send_error_json(403, "Compte en lecture seule : enregistrement impossible")
@@ -849,6 +1083,14 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
 
     def send_error_json(self, status, message):
         self.send_json({"ok": False, "error": message}, status=status)
+
+    def send_pdf(self, data, filename):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
 
 if __name__ == "__main__":
