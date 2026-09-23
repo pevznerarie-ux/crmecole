@@ -689,12 +689,12 @@ async function refreshAccounts() {
 // serait injouable avec 10 000+ fiches (rendu lent, impossible à parcourir).
 // On affiche un champ texte + une liste filtrée, et on stocke l'id choisi dans
 // un champ caché (recordId) — c'est ce champ que lisent les handlers d'envoi.
-function pickerField(label, name, selected) {
+function pickerField(label, name, selected, required = true) {
   const displayValue = selected ? selected.name : "";
   const idValue = selected ? selected.id : "";
   return `<label class="span-2 picker-wrap" data-picker="${name}">${label}
     <input type="text" class="picker-input" data-picker-input="${name}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Rechercher un nom, un email..." value="${escapeHtml(displayValue)}">
-    <input type="hidden" name="${name}" data-picker-value="${name}" value="${escapeHtml(idValue)}" required>
+    <input type="hidden" name="${name}" data-picker-value="${name}" value="${escapeHtml(idValue)}"${required ? " required" : ""}>
     <div class="picker-results" data-picker-results="${name}"></div>
   </label>`;
 }
@@ -931,16 +931,41 @@ function hpTaskRow(t) {
   const due = taskDueInfo(t);
   const linkedRecord = t.recordId ? recordById(t.recordId) : null;
   const done = t.status === "fait";
+  // Les commandes de fin de ligne (date, assigné, modifier, supprimer) sont
+  // regroupées dans leur propre bloc : sur un petit écran, ajouter le bouton
+  // "Modifier" en plus de "Supprimer" ne tenait plus sur une seule ligne à
+  // côté du titre et débordait hors de l'écran (invisible et impossible à
+  // toucher). Ce regroupement permet de le faire passer proprement à la
+  // ligne suivante sur mobile, sans rien changer sur desktop où il y a
+  // largement la place.
   return `<div class="hp-task-row${done ? " hp-task-row-done" : ""}">
     <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""}>
     <div class="hp-task-main">
       <span class="hp-task-title">${escapeHtml(t.title)}</span>
       ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
     </div>
-    <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
-    ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
-    <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+    <div class="hp-task-controls">
+      <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
+      ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
+      <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
+      <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+    </div>
   </div>`;
+}
+// Modifier une tâche existante : jusqu'ici on pouvait seulement cocher,
+// changer la date (directement sur la ligne) ou supprimer une tâche —
+// impossible de corriger une faute de frappe dans le titre, changer le
+// contact lié ou réassigner la tâche sans tout refaire depuis le début.
+function openEditTask(id) {
+  const t = tasks.find(x => x.id === id);
+  if (!t) return notify("Tâche introuvable");
+  const linked = t.recordId ? recordById(t.recordId) : null;
+  modalShell("editTask", "Tâche", "Modifier la tâche",
+    `<input type="hidden" name="taskId" value="${escapeHtml(t.id)}">
+     ${field("Titre de la tâche", "title", t.title, "text", "required maxlength='140'")}
+     ${field("Échéance", "dueDate", t.dueDate || "", "date")}
+     ${pickerField("Contact lié (optionnel)", "recordId", linked, false)}
+     ${field("Assigné à", "assignedTo", t.assignedTo || "")}`, "Enregistrer");
 }
 // Reconnaît un verbe d'action suivi d'un nom ("Contacter Dupont", "Relancer
 // Cohen"...) pour proposer des fiches du CRM en autocomplétion ; à défaut de
@@ -1703,6 +1728,7 @@ function handleAction(key) {
   if (key.startsWith("edit-account:")) { const acc = accounts.find(a => a.id === key.split(":")[1]); if (acc) openModal("account", { existing: acc }); return; }
   if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
   if (key.startsWith("toggle-task:")) return toggleTaskDone(key.split(":")[1]);
+  if (key.startsWith("edit-task:")) return openEditTask(key.split(":")[1]);
   if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
   if (key.startsWith("edit-payment:")) return openEditPayment(key.split(":")[1]);
   if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
@@ -2030,6 +2056,18 @@ function submitForm(event) {
       const rec = t.recordId ? recordById(t.recordId) : null;
       logAudit(`Tâche ajoutée : ${t.title}${rec ? ` (liée à ${rec.name})` : ""}.`);
       if (rec) state.tab = "Tâches";
+    },
+    editTask: () => {
+      const t = tasks.find(x => x.id === data.taskId);
+      if (!t) { notify("Tâche introuvable"); return; }
+      const cleanTitle = (data.title || "").trim();
+      if (!cleanTitle) { notify("Le titre ne peut pas être vide"); return; }
+      t.title = cleanTitle;
+      t.dueDate = data.dueDate || "";
+      t.recordId = data.recordId || null;
+      t.assignedTo = (data.assignedTo || "").trim();
+      logAudit(`Tâche modifiée : ${t.title}.`);
+      state.tab = "Tâches";
     },
     editPayment: () => {
       const p = payments.find(item => item.id === data.paymentId);

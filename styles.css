@@ -839,10 +839,11 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-add { width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--hp-rust); color: #fff9f2; font-size: 19px; line-height: 1; cursor: pointer; display: grid; place-items: center; transition: background .15s ease; }
 .hp-task-add:hover { background: var(--hp-rust-deep); }
 .hp-task-list { display: flex; flex-direction: column; }
-.hp-task-row { display: flex; align-items: center; gap: 10px; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); }
+.hp-task-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; row-gap: 6px; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); }
 .hp-task-row:last-child { border-bottom: none; }
 .hp-task-checkbox { width: 17px; height: 17px; accent-color: var(--hp-rust); flex: none; cursor: pointer; }
 .hp-task-main { flex: 1 1 auto; min-width: 60px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hp-task-controls { display: flex; align-items: center; gap: 10px; flex: none; }
 .hp-task-title { min-width: 40px; font-size: 13.5px; color: var(--hp-ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hp-task-contact-chip { flex: none; border: none; background: var(--hp-rust-soft); color: var(--hp-rust-deep); font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer; }
 .hp-task-contact-chip:hover { background: var(--hp-rust); color: #fff9f2; }
@@ -852,8 +853,9 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-date-today { border-color: var(--hp-rust); background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
 .hp-task-date-soon { border-color: #c9d2bd; background: #eef0e8; color: #566047; }
 .hp-task-assignee { font-size: 11px; color: var(--hp-muted); flex: none; }
-.hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
-.hp-task-row:hover .hp-task-remove { opacity: 1; }
+.hp-task-edit, .hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
+.hp-task-row:hover .hp-task-edit, .hp-task-row:hover .hp-task-remove { opacity: 1; }
+.hp-task-edit:hover { color: var(--hp-rust-deep); background: var(--hp-rust-soft); }
 .hp-task-remove:hover { color: var(--hp-rust-deep); background: var(--hp-rust-soft); }
 .hp-task-row-done .hp-task-title { text-decoration: line-through; color: var(--hp-muted); }
 .hp-task-row-done { opacity: .75; }
@@ -904,4 +906,14 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
   .hp-task-assignee { display: none; }
   .hp-task-date { width: 100px; font-size: 10.5px; padding: 4px; }
   .hp-task-contact-chip { font-size: 10px; }
+  /* Sur tactile il n'y a pas de survol : les boutons modifier/supprimer
+     restaient invisibles en permanence (opacity 0 tant qu'on ne survole pas
+     la ligne), donc impossible d'y toucher au doigt. On les affiche toujours
+     sur mobile/tablette. */
+  .hp-task-edit, .hp-task-remove { opacity: 1; }
+  /* Sur un petit écran, date + assigné + modifier + supprimer ne tiennent
+     plus à côté du titre sur une seule ligne : on les fait passer ensemble
+     à la ligne suivante (basis 100%) plutôt que de laisser le dernier
+     bouton déborder hors de l'écran, invisible et impossible à toucher. */
+  .hp-task-controls { flex: 1 1 100%; justify-content: flex-end; }
 }
