@@ -608,6 +608,8 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 
 .muted-note { margin: 2px 0 12px; color: var(--muted); font-size: 12.5px; font-style: italic; }
 
+.section-sep { border: none; border-top: 1px solid var(--hp-line, #e5e0d8); margin: 20px 0; }
+
 .stacked-panels { display: flex; flex-direction: column; gap: 16px; }
 .settings-toggle-row { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 500; color: var(--ink-soft); cursor: pointer; margin: 4px 0 12px; }
 .settings-toggle-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }

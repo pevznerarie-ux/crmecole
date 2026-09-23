@@ -268,7 +268,7 @@ function currentCrmData() {
     state: { selectedRecord: state.selectedRecord },
     records, payments, imports, users, groups, interactions, linkages,
     customFields, receiptTemplates, savedViews, auditLog, interactionCategories, tasks,
-    holidayNotes,
+    holidayNotes, receiptLog,
   };
 }
 
@@ -360,6 +360,13 @@ let tasks = [];
 // JEWISH_HOLIDAYS[].key), pour pouvoir le retravailler et l'affiner au fil
 // du temps au lieu de repartir d'un message figé à chaque fois.
 let holidayNotes = {};
+// Suivi comptable des reçus CERFA : une ligne ajoutée à chaque génération OU
+// régénération d'un reçu, à donner à l'expert-comptable (export CSV/Excel
+// depuis l'onglet Reçus). Le numéro de reçu, lui, est stocké directement sur
+// le paiement (p.receiptNumber) et ne change jamais une fois attribué —
+// régénérer un reçu réémet le même numéro, mais ajoute quand même une
+// nouvelle ligne ici pour tracer l'événement.
+let receiptLog = [];
 
 const apps = [
   ["HelloAsso", "Collecter"], ["Stripe", "Collecter"], ["GoCardless", "Collecter"], ["iRaiser", "Collecter"],
@@ -1606,8 +1613,23 @@ function receipts() {
   const { visible, remaining } = visiblePage(rows, "paymentsPage");
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
   return `<div class="split"><section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Générer les reçus manquants", "generate-receipts", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p><div class="table-wrap"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th></tr></thead><tbody>${visible.map((p,i)=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receipt==="Genere"||p.receipt==="Généré"||p.receipt==="Disponible" ? `RF-${new Date().getFullYear()}-${1000+i}` : "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
-    </section><section class="panel pad"><span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2><div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>${action("Ajouter un modèle", "add-receipt-template")}</section></div>`;
+    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p>
+    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th></tr></thead><tbody>${visible.map(p=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}:Paiements">
+      <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
+      <p>${p.receiptNumber || "Pas encore de numéro"}</p>
+      <div class="chip-list">${status(p.receipt)}</div>
+    </button>`).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
+    </section><section class="panel pad">
+      <span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2>
+      <div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>
+      ${action("Ajouter un modèle", "add-receipt-template")}
+      <hr class="section-sep">
+      <span class="eyebrow">Suivi comptable</span><h2>Journal des reçus CERFA</h2>
+      <p class="muted-note">${receiptLog.length ? `${receiptLog.length.toLocaleString("fr-FR")} génération(s)/régénération(s) enregistrée(s)` : "Aucune génération enregistrée pour l'instant"} — une ligne par émission, à donner tel quel à l'expert-comptable.</p>
+      ${action("Exporter le suivi comptable (CSV)", "export-receipt-log", "primary-btn")}
+      <p class="muted-note" style="margin-top:14px">💡 PDF du reçu et envoi automatique par email : bientôt — en attente du modèle CERFA exact et du compte email dédié.</p>
+    </section></div>`;
 }
 
 function importsView() {
@@ -2083,7 +2105,8 @@ function handleAction(key) {
     "open-actions": () => { state.drawer = "actions"; render(); },
     "close-drawer": () => { state.drawer = null; render(); },
     "dedupe": () => { state.drawer = "dedupe"; render(); },
-    "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { p.receipt = "Généré"; n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
+    "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { logReceiptGeneration(p); n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
+    "export-receipt-log": () => downloadCsv(`suivi-comptable-cerfa-${todayStr().replace(/\//g,"-")}.csv`, receiptLog),
     "edit-record": () => openModal("editRecord"),
     "delete-record": () => deleteSelectedRecord(),
     "close-detail": () => { state.showDetail = false; state.mobileDetailOpen = false; render(); },
@@ -2202,6 +2225,42 @@ function paymentRemaining(p) {
 // statut.
 function bumpReceiptIfReceived(p) {
   if (p.type === "Don" && p.status === "Reçu" && p.receipt === "Non éligible") p.receipt = "À générer";
+}
+// Le numéro de reçu est une mention légale du CERFA : il doit rester le même
+// que le reçu soit régénéré une fois ou dix fois. On l'attribue une seule
+// fois, au tout premier "Généré", séquentiel par année civile (RF-2026-0001,
+// RF-2026-0002...) — jamais recalculé à l'affichage comme avant (ce qui
+// changeait le numéro à chaque tri/filtre, inutilisable pour un vrai reçu
+// fiscal).
+function nextReceiptNumber() {
+  const year = new Date().getFullYear();
+  const prefix = `RF-${year}-`;
+  const used = payments
+    .filter(p => p.receiptNumber && p.receiptNumber.startsWith(prefix))
+    .map(p => Number(p.receiptNumber.slice(prefix.length)) || 0);
+  const next = (used.length ? Math.max(...used) : 0) + 1;
+  return `${prefix}${String(next).padStart(4, "0")}`;
+}
+// Entité émettrice par défaut le temps qu'Arié envoie le modèle CERFA exact
+// utilisé par l'association (nom, adresse, SIREN, signataire...). À
+// remplacer dès que ce document est en main.
+const DEFAULT_RECEIPT_ENTITY = "Réseau Sinaï";
+// Enregistre une (re)génération de reçu : attribue le numéro s'il n'existe
+// pas encore, marque le paiement "Généré", et ajoute une ligne au suivi
+// comptable pour l'expert-comptable — y compris pour une simple
+// régénération, afin qu'il voie chaque émission/réémission.
+function logReceiptGeneration(p, entity) {
+  if (!p.receiptNumber) p.receiptNumber = nextReceiptNumber();
+  p.receipt = "Généré";
+  receiptLog.unshift({
+    "Date de génération": todayStr(),
+    "Numéro de reçu": p.receiptNumber,
+    "Donateur": p.payer,
+    "Montant (€)": p.amount,
+    "Date du don": p.date,
+    "Mode de paiement": p.method,
+  });
+  return p.receiptNumber;
 }
 // Bloc "versements" affiché sous un paiement marqué "échelonné" : le total
 // déjà payé et le moyen utilisé pour chaque versement, le reste à payer
@@ -2798,6 +2857,7 @@ async function bootApp() {
     interactionCategories = Array.isArray(backup.interactionCategories) && backup.interactionCategories.length ? backup.interactionCategories : interactionCategories;
     tasks = Array.isArray(backup.tasks) ? backup.tasks : tasks;
     holidayNotes = (backup.holidayNotes && typeof backup.holidayNotes === "object") ? backup.holidayNotes : holidayNotes;
+    receiptLog = Array.isArray(backup.receiptLog) ? backup.receiptLog : receiptLog;
     if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
       state.selectedRecord = backup.state.selectedRecord;
     }
