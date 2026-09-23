@@ -1191,6 +1191,24 @@ function formatFrDate(iso) {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 }
+// Version longue (JJ/MM/AAAA) de formatFrDate, pour les endroits qui
+// affichaient déjà les dates au format complet (fiches paiement, journal
+// comptable) plutôt qu'au format court "23 sept." des tâches.
+function formatFrDateFull(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("fr-FR");
+}
+// La date à afficher/utiliser pour un paiement : la date de paiement réelle
+// une fois le don reçu, sinon la date de la promesse, et pour les paiements
+// créés avant l'ajout de ces deux champs on retombe sur l'ancienne date de
+// saisie (p.date) pour ne rien casser sur les anciennes données.
+function paymentPrimaryDate(p) {
+  if (p.status === "Reçu" && p.paymentDate) return formatFrDateFull(p.paymentDate);
+  if (p.promiseDate) return formatFrDateFull(p.promiseDate);
+  return p.date || "";
+}
 function hpTasksPanel() {
   const open = tasks.filter(t => t.status !== "fait").sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
   const done = tasks.filter(t => t.status === "fait").sort((a, b) => (b.completedAt || b.createdAt || "").localeCompare(a.completedAt || a.createdAt || ""));
@@ -1593,10 +1611,10 @@ function paymentTable(type = null) {
     <div class="pay-tabs">${["Tous les paiements","Dons","Adhésions","Billetterie","Reçus"].map(s => `<button class="${state.section===s ? "active" : ""}" data-view="pay" data-section="${s}">${s}</button>`).join("")}</div>
     ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p>
     <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Occasion</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
-    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.date}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
+    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${paymentPrimaryDate(p)}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
     <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}:Paiements">
       <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
-      <p>${escapeHtml(p.type)} · ${p.date} · ${escapeHtml(p.method || "-")}</p>
+      <p>${escapeHtml(p.type)} · ${paymentPrimaryDate(p)} · ${escapeHtml(p.method || "-")}</p>
       <div class="chip-list">${status(p.status)} ${status(p.receipt)} ${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ")}</div>
     </button>`).join("")}${loadMore}</div>` : emptyState("Aucun paiement enregistré pour l'instant.", "Ajouter un don", "add-payment:Don")}
   </section>`;
@@ -2153,6 +2171,16 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
     syncInstallmentSection();
     installmentSelect.addEventListener("change", syncInstallmentSection);
   }
+  // "Date du paiement" ne veut rien dire tant qu'un don n'est pas "Reçu" —
+  // on ne la montre que dans ce cas (une promesse pas encore payée n'a pas
+  // encore de date de paiement à donner).
+  const paymentStatusSelect = dialogContent().querySelector('select[name="status"]');
+  const paymentDateSection = dialogContent().querySelector('[data-payment-date-section]');
+  if (paymentStatusSelect && paymentDateSection) {
+    const syncPaymentDateSection = () => { paymentDateSection.style.display = paymentStatusSelect.value === "Reçu" ? "" : "none"; };
+    syncPaymentDateSection();
+    paymentStatusSelect.addEventListener("change", syncPaymentDateSection);
+  }
   dialogContent().querySelector("input:not([readonly]), select, textarea")?.focus();
 }
 
@@ -2170,6 +2198,8 @@ function openQuickForRecord(recordId, kind) {
      ${installmentFormSection(null)}
      ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
      ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
+     ${field("Date de la promesse", "promiseDate", todayIso(), "date")}
+     <div data-payment-date-section>${field("Date du paiement", "paymentDate", todayIso(), "date")}</div>
      ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
   if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
     `${contactLockedField(r)}
@@ -2205,6 +2235,8 @@ function openEditPayment(id) {
      ${installmentFormSection(p)}
      ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
      ${selectField("Statut", "status", ensureOption(["Reçu","Promis"], p.status), p.status)}
+     ${field("Date de la promesse", "promiseDate", p.promiseDate || "", "date")}
+     <div data-payment-date-section>${field("Date du paiement", "paymentDate", p.paymentDate || todayIso(), "date")}</div>
      ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
      ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
 }
@@ -2257,7 +2289,7 @@ function logReceiptGeneration(p, entity) {
     "Numéro de reçu": p.receiptNumber,
     "Donateur": p.payer,
     "Montant (€)": p.amount,
-    "Date du don": p.date,
+    "Date du don": paymentPrimaryDate(p),
     "Mode de paiement": p.method,
   });
   return p.receiptNumber;
@@ -2310,10 +2342,10 @@ function applyInlineInstallment(p, data) {
   if (!Array.isArray(p.installments)) p.installments = [];
   p.installments.push({ id: nextId("VER", p.installments), date: todayStr(), amount: montant, method: data.newInstallmentMethod || p.method });
   logAudit(`Versement de ${euro(montant)} (${data.newInstallmentMethod || p.method}) ajouté pour ${p.payer} — ${p.type}.`);
-  if (paymentRemaining(p) <= 0) { p.status = "Reçu"; bumpReceiptIfReceived(p); }
+  if (paymentRemaining(p) <= 0) { p.status = "Reçu"; p.paymentDate = p.paymentDate || todayIso(); bumpReceiptIfReceived(p); }
 }
 function paymentTimelineItem(p) {
-  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${p.date}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
+  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${paymentPrimaryDate(p)}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
 }
 function openAddInstallment(id) {
   const p = payments.find(item => item.id === id);
@@ -2367,6 +2399,8 @@ function openModal(kind, options = {}) {
        ${installmentFormSection(null)}
        ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
        ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
+       ${field("Date de la promesse", "promiseDate", todayIso(), "date")}
+       <div data-payment-date-section>${field("Date du paiement", "paymentDate", todayIso(), "date")}</div>
        ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
     account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
@@ -2420,7 +2454,7 @@ function submitForm(event) {
     payment: () => {
       const payer = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.payer);
       if (!payer) { notify("Payeur introuvable"); return; }
-      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: (data.type === "Don" && data.status === "Reçu") ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [] };
+      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: (data.type === "Don" && data.status === "Reçu") ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [], promiseDate: data.promiseDate || "", paymentDate: data.status === "Reçu" ? (data.paymentDate || todayIso()) : "" };
       payments.unshift(p);
       logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
       applyInlineInstallment(p, data);
@@ -2495,6 +2529,11 @@ function submitForm(event) {
       p.method = data.method;
       p.status = data.status;
       p.receipt = data.receipt;
+      p.promiseDate = data.promiseDate || p.promiseDate || "";
+      // La date de paiement ne veut rien dire tant que ce n'est qu'une
+      // promesse : on la vide si on repasse en "Promis", et on la fixe
+      // (ou on la garde) dès que c'est "Reçu".
+      p.paymentDate = data.status === "Reçu" ? (data.paymentDate || p.paymentDate || todayIso()) : "";
       // Un don et une promesse sont la même chose, juste à un stade
       // différent : si on vient de repasser le Statut sur "Reçu" sans avoir
       // pensé à changer le Reçu à la main, on l'ouvre automatiquement.
@@ -2518,7 +2557,7 @@ function submitForm(event) {
       // le don reçu : ça évite d'avoir à repasser manuellement le statut sur
       // "Reçu" en plus d'avoir ajouté le dernier versement — et ça ouvre le
       // reçu fiscal du même coup.
-      if (paymentRemaining(p) <= 0) { p.status = "Reçu"; bumpReceiptIfReceived(p); }
+      if (paymentRemaining(p) <= 0) { p.status = "Reçu"; p.paymentDate = p.paymentDate || data.date || todayIso(); bumpReceiptIfReceived(p); }
       state.tab = "Paiements";
     },
     field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
