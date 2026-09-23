@@ -1,7 +1,7 @@
 // Service worker minimal : met en cache la coquille de l'app pour un chargement
 // rapide et une installation sur mobile. Ne met JAMAIS en cache les appels /api/*
 // pour que les données du CRM restent toujours a jour.
-const CACHE_NAME = "crm-sinai-shell-v26";
+const CACHE_NAME = "crm-sinai-shell-v27";
 const SHELL_FILES = [
   "./index.html",
   "./styles.css",

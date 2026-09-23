@@ -879,6 +879,23 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-tasks-done-toggle { margin-top: 10px; }
 .hp-task-list-done { margin-top: 8px; border-top: 1px dashed var(--hp-line); padding-top: 6px; }
 
+/* ---- Stratégie des fêtes juives (accueil) ------------------------------ */
+.hp-holidays { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-holidays .hp-activity-head { margin-bottom: 14px; }
+.hp-holiday-list { display: flex; flex-direction: column; }
+.hp-holiday-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); }
+.hp-holiday-row:last-child { border-bottom: none; }
+.hp-holiday-main { display: flex; align-items: center; gap: 12px; }
+.hp-holiday-emoji { font-size: 22px; flex: none; }
+.hp-holiday-main strong { display: block; font-size: 14px; color: var(--hp-ink); }
+.hp-holiday-date { font-size: 12px; color: var(--hp-muted); }
+/* ---- Modale "Préparer une fête" : conseil + modèles à copier ----------- */
+.holiday-strategy-tip { background: var(--hp-rust-soft); color: var(--hp-rust-deep); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5; }
+.copy-row { display: flex; justify-content: flex-end; margin-top: -6px; }
+.copy-btn { min-height: 32px; padding: 0 12px; font-size: 12px; }
+.holiday-textarea { min-height: 130px !important; max-height: 220px !important; }
+.holiday-textarea-sms { min-height: 70px !important; max-height: 110px !important; }
+
 .hp-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 34px; }
 .hp-card { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
 .hp-card-head { display: flex; align-items: center; gap: 10px; }
@@ -933,6 +950,8 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
      à la ligne suivante (basis 100%) plutôt que de laisser le dernier
      bouton déborder hors de l'écran, invisible et impossible à toucher. */
   .hp-task-controls { flex: 1 1 100%; justify-content: flex-end; }
+  .hp-holiday-row { flex-direction: column; align-items: stretch; }
+  .hp-holiday-row button { width: 100%; }
 }
 
 /* Sous iOS/Safari (et la plupart des navigateurs mobiles), un champ de

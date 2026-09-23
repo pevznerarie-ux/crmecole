@@ -863,6 +863,8 @@ function home() {
 
       ${hpTasksPanel()}
 
+      ${hpHolidayPanel()}
+
       <section class="hp-columns">
         ${hpCard("hp-icon-family", "Contacts et familles", [["Ajouter un contact", "add-contact"], ["Ajouter une structure", "add-structure"], ["Rechercher les doublons", "dedupe"]])}
         ${hpCard("hp-icon-coin", "Collecte", [["Ajouter un don", "add-payment:Don"], ["Ajouter une adhésion", "add-payment:Adhésion"], ["Reçus", "goto-receipts"]])}
@@ -885,11 +887,161 @@ function home() {
     </div>`;
 }
 
+// ---- Stratégie des fêtes juives -------------------------------------------
+// Logique d'un directeur de collecte de fonds pensée pour la mission de
+// Sinaï (éducation juive, kirouv, vision de notre Rav) : avant chaque fête,
+// l'accueil met en avant la prochaine échéance avec un conseil stratégique
+// (quand solliciter, quand se contenter de vœux) et des modèles de message
+// prêts à copier-coller (email + SMS/WhatsApp), plutôt que d'automatiser un
+// envoi que ce CRM ne sait de toute façon pas faire (pas de messagerie
+// intégrée). Dates vérifiées (calendrier hébraïque, diaspora) pour 2026 à
+// 2028 ; à compléter chaque année pour la suite.
+const HOLIDAY_TEMPLATES = {
+  "roch-hachana": {
+    strategy: "Moment fort pour ouvrir l'année avec gratitude : remercier chaleureusement pour l'année écoulée prépare le terrain pour la suite, sans qu'il soit nécessaire de solliciter directement dans ce message.",
+    emailSubject: "Chana Tova Oumetouka 🍎 — Tous nos vœux des Institutions Sinaï",
+    emailBody: "Chers amis,\n\nÀ l'aube de cette nouvelle année, toute l'équipe des Institutions Sinaï — élèves, enseignants et notre Rav — se joint à moi pour vous souhaiter une Chana Tova Oumetouka, une année douce et pleine de bénédictions pour vous et les vôtres.\n\nGrâce à votre soutien fidèle, des dizaines d'enfants continuent de grandir dans la joie d'apprendre et de vivre leur judaïsme. C'est une fierté que nous partageons avec vous.\n\nQue cette nouvelle année vous apporte santé, réussite et beaucoup de nahat.\n\nChana Tova !",
+    sms: "Chana Tova Oumetouka ! Toute l'équipe des Institutions Sinaï vous souhaite une année douce et bénie, à vous et aux vôtres. Merci d'être à nos côtés. 🍎",
+  },
+  "yom-kippour": {
+    strategy: "Message purement spirituel : Yom Kippour n'est pas un moment pour solliciter, mais pour exprimer un souhait sincère de pardon et d'inscription pour une bonne année.",
+    emailSubject: "Guemar 'Hatima Tova — Nos vœux pour Yom Kippour",
+    emailBody: "Chers amis,\n\nÀ la veille de Yom Kippour, nous vous souhaitons, ainsi qu'à toute votre famille, un Guemar 'Hatima Tova — d'être inscrits et scellés pour une année de vie, de santé et de paix.\n\nQue ce jour de recueillement soit source d'élévation pour vous, comme il l'est chaque année pour nos élèves qui en apprennent la portée avec notre Rav.\n\nTsom Kal,",
+    sms: "Guemar 'Hatima Tova. Que vous soyez inscrits pour une année de vie, de santé et de paix. Tsom Kal 🕊️",
+  },
+  "souccot": {
+    strategy: "L'hospitalité est au cœur de Souccot : c'est l'occasion idéale d'inviter un donateur à visiter l'école ou la Souccah plutôt que de simplement lui écrire.",
+    emailSubject: "'Hag Sameach — Venez visiter notre Souccah !",
+    emailBody: "Chers amis,\n\n'Hag Souccot Sameach ! En cette fête où l'on ouvre grand sa Souccah, nous serions heureux de vous accueillir pour partager un moment avec nos élèves et notre équipe.\n\nVotre soutien permet chaque jour à nos enfants de grandir entourés de joie et de valeurs juives authentiques — nous voulions, en cette fête de la joie, simplement vous en remercier.\n\n'Hag Sameach à vous et à toute votre famille !",
+    sms: "'Hag Souccot Sameach ! Toute l'équipe Sinaï vous souhaite une fête pleine de joie, entourés des vôtres. 🌿",
+  },
+  "hanouka": {
+    strategy: "Le moment classique de collecte de fin d'année : chaque bougie peut symboliser un enfant scolarisé grâce aux donateurs — un angle puissant, à condition de rester dans la gratitude plus que dans la demande directe.",
+    emailSubject: "'Hag Ourim Sameach 🕎 — 8 bougies, 8 raisons de dire merci",
+    emailBody: "Chers amis,\n\nEn cette fête des lumières, chaque bougie que nous allumons nous rappelle qu'un tout petit geste peut illuminer beaucoup d'obscurité — exactement ce que fait votre générosité pour nos élèves toute l'année.\n\nCette Hanouka, si le cœur vous en dit, votre soutien nous permettra d'offrir à davantage d'enfants une éducation juive de qualité, portée par la vision de notre Rav depuis trois générations.\n\n'Hag Ourim Sameach, et merci du fond du cœur.",
+    sms: "'Hag Ourim Sameach ! Cette Hanouka, chaque bougie éclaire un enfant que vous aidez à grandir. Merci pour votre soutien. 🕎",
+  },
+  "tou-bichvat": {
+    strategy: "Thème de la croissance et de la plantation : bien adapté pour évoquer un don régulier (« planter aujourd'hui pour récolter demain ») plutôt qu'un don ponctuel.",
+    emailSubject: "'Hag Sameach 🌳 — Planter aujourd'hui, récolter demain",
+    emailBody: "Chers amis,\n\nTou Bichvat nous rappelle qu'un arbre a besoin de temps, de patience et de constance pour porter ses fruits — comme l'éducation que nous donnons chaque jour à nos élèves.\n\nVotre soutien régulier est justement cette eau qui permet à cette « plantation » de grandir année après année. Nous vous en remercions sincèrement.\n\n'Hag Sameach !",
+    sms: "'Hag Tou Bichvat Sameach ! Merci de faire grandir, avec nous, l'éducation juive de nos enfants, saison après saison. 🌳",
+  },
+  "pourim": {
+    strategy: "Les Michloa'h Manot et Matanot LaEvyonim ancrent le don dans la tradition même de Pourim : c'est le moment de l'année où solliciter est le plus naturel et le mieux accueilli.",
+    emailSubject: "Pourim Sameach 🎭 — Une Matanot LaEvyonim pour nos enfants ?",
+    emailBody: "Chers amis,\n\nPourim Sameach ! Cette fête nous rappelle, à travers la Mitsva de Matanot LaEvyonim, combien donner fait partie intégrante de notre joie.\n\nCette année encore, nous comptons sur des amis comme vous pour permettre à chaque enfant de nos écoles de vivre Pourim dans la joie et l'abondance, comme il se doit.\n\nMerci d'avance pour votre générosité, et Pourim Sameach à toute la famille !",
+    sms: "Pourim Sameach ! Comme le veut la tradition des Matanot LaEvyonim, aidez-nous à offrir à chaque enfant une fête de Pourim joyeuse. Merci ! 🎭",
+  },
+  "pessah": {
+    strategy: "La Kimha D'Pis'ha (aide traditionnelle aux familles avant la fête) est un point d'entrée naturel et ancien pour une demande ciblée, en particulier pour les familles les plus modestes de nos écoles.",
+    emailSubject: "'Hag Cacher Vesameach 🍷 — Offrir un Pessah serein à chaque famille",
+    emailBody: "Chers amis,\n\nÀ l'approche de Pessah, la tradition de la Kimha D'Pis'ha nous rappelle notre responsabilité collective : permettre à chaque famille, y compris les plus modestes, de vivre la fête de la liberté avec sérénité.\n\nGrâce à vous, plusieurs familles de nos écoles pourront préparer ce Séder dans la dignité. Nous vous remercions infiniment pour votre soutien.\n\n'Hag Cacher Vesameach à vous et aux vôtres !",
+    sms: "'Hag Cacher Vesameach ! Grâce à la Kimha D'Pis'ha, aidons ensemble chaque famille de nos écoles à vivre un Pessah serein. Merci 🍷",
+  },
+  "chavouot": {
+    strategy: "Fête du don de la Torah et de l'étude : idéale pour mettre en valeur les programmes pédagogiques financés par les donateurs, sans nécessairement solliciter directement.",
+    emailSubject: "'Hag Sameach 📜 — Merci de faire vivre l'étude de la Torah",
+    emailBody: "Chers amis,\n\nChavouot célèbre le don de la Torah — le plus précieux des héritages que nous transmettons chaque jour à nos élèves, grâce à vous.\n\nQue cette fête soit l'occasion de vous dire, simplement, merci pour tout ce que vous rendez possible dans nos écoles.\n\n'Hag Sameach !",
+    sms: "'Hag Chavouot Sameach ! Merci de faire vivre, avec nous, l'étude de la Torah auprès de nos élèves. 📜",
+  },
+};
+const JEWISH_HOLIDAYS = [
+  { key: "souccot2026", name: "Souccot", date: "2026-09-25", emoji: "🌿", templateKey: "souccot" },
+  { key: "hanouka2026", name: "Hanouka", date: "2026-12-04", emoji: "🕎", templateKey: "hanouka" },
+  { key: "toubichvat2027", name: "Tou Bichvat", date: "2027-01-22", emoji: "🌳", templateKey: "tou-bichvat" },
+  { key: "pourim2027", name: "Pourim", date: "2027-03-22", emoji: "🎭", templateKey: "pourim" },
+  { key: "pessah2027", name: "Pessah", date: "2027-04-21", emoji: "🍷", templateKey: "pessah" },
+  { key: "chavouot2027", name: "Chavouot", date: "2027-06-10", emoji: "📜", templateKey: "chavouot" },
+  { key: "rh2027", name: "Roch Hachana", date: "2027-10-01", emoji: "🍎", templateKey: "roch-hachana" },
+  { key: "yk2027", name: "Yom Kippour", date: "2027-10-10", emoji: "🕊️", templateKey: "yom-kippour" },
+  { key: "souccot2027", name: "Souccot", date: "2027-10-15", emoji: "🌿", templateKey: "souccot" },
+  { key: "hanouka2027", name: "Hanouka", date: "2027-12-24", emoji: "🕎", templateKey: "hanouka" },
+  { key: "toubichvat2028", name: "Tou Bichvat", date: "2028-02-11", emoji: "🌳", templateKey: "tou-bichvat" },
+  { key: "pourim2028", name: "Pourim", date: "2028-03-11", emoji: "🎭", templateKey: "pourim" },
+  { key: "pessah2028", name: "Pessah", date: "2028-04-10", emoji: "🍷", templateKey: "pessah" },
+];
+function daysBetweenIso(isoA, isoB) {
+  const a = new Date(`${isoA}T00:00:00`);
+  const b = new Date(`${isoB}T00:00:00`);
+  return Math.round((b - a) / 86400000);
+}
+function daysBeforeIso(dateStr, n) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+function upcomingHolidays(count = 3) {
+  const today = todayIso();
+  return JEWISH_HOLIDAYS
+    .filter(h => h.date >= today)
+    .sort((a, b) => a.date < b.date ? -1 : 1)
+    .slice(0, count)
+    .map(h => ({ ...h, daysLeft: daysBetweenIso(today, h.date) }));
+}
+function hpHolidayPanel() {
+  const upcoming = upcomingHolidays(3);
+  if (!upcoming.length) return "";
+  return `<section class="hp-holidays">
+    <div class="hp-activity-head"><h2>Stratégie des fêtes</h2><span class="hp-tasks-count">Prochaine dans ${upcoming[0].daysLeft <= 0 ? "0 j" : `${upcoming[0].daysLeft} j`}</span></div>
+    <div class="hp-holiday-list">
+      ${upcoming.map(h => `<div class="hp-holiday-row">
+        <div class="hp-holiday-main">
+          <span class="hp-holiday-emoji">${h.emoji}</span>
+          <div>
+            <strong>${escapeHtml(h.name)}</strong>
+            <span class="hp-holiday-date">${formatFrDate(h.date)} · ${h.daysLeft <= 0 ? "aujourd'hui" : `dans ${h.daysLeft} jour${h.daysLeft > 1 ? "s" : ""}`}</span>
+          </div>
+        </div>
+        ${action("Préparer la relance", `holiday-prepare:${h.key}`, "primary-btn")}
+      </div>`).join("")}
+    </div>
+  </section>`;
+}
+function copyButton(label, targetId) {
+  return `<button type="button" class="copy-btn" data-copy-target="${targetId}">${label}</button>`;
+}
+function openHolidayModal(key) {
+  const h = JEWISH_HOLIDAYS.find(x => x.key === key);
+  if (!h) return notify("Fête introuvable");
+  const tpl = HOLIDAY_TEMPLATES[h.templateKey];
+  if (!tpl) return notify("Modèle introuvable");
+  modalShell("holidayTask", "Stratégie des fêtes", `Préparer ${h.name}`,
+    `<input type="hidden" name="holidayKey" value="${escapeHtml(h.key)}">
+     <div class="span-2 holiday-strategy-tip">💡 ${escapeHtml(tpl.strategy)}</div>
+     <label class="span-2">Objet de l'email<input type="text" readonly id="holidayEmailSubject" value="${escapeHtml(tpl.emailSubject)}"></label>
+     <div class="span-2 copy-row">${copyButton("Copier l'objet", "holidayEmailSubject")}</div>
+     <label class="span-2">Corps de l'email<textarea readonly id="holidayEmailBody" class="holiday-textarea">${escapeHtml(tpl.emailBody)}</textarea></label>
+     <div class="span-2 copy-row">${copyButton("Copier l'email", "holidayEmailBody")}</div>
+     <label class="span-2">Message court (SMS / WhatsApp)<textarea readonly id="holidaySmsBody" class="holiday-textarea holiday-textarea-sms">${escapeHtml(tpl.sms)}</textarea></label>
+     <div class="span-2 copy-row">${copyButton("Copier le message", "holidaySmsBody")}</div>`,
+    "Créer une tâche de relance");
+}
+function copyFieldValue(el) {
+  const text = el.value;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => notify("Copié dans le presse-papiers")).catch(() => legacyCopy(el));
+  } else {
+    legacyCopy(el);
+  }
+}
+function legacyCopy(el) {
+  try {
+    el.select();
+    el.setSelectionRange(0, 999999);
+    document.execCommand("copy");
+    notify("Copié dans le presse-papiers");
+  } catch {
+    notify("Impossible de copier automatiquement — sélectionnez le texte manuellement.");
+  }
+}
+
 // ---- Tâches : premier aperçu "calendrier" sur l'accueil ------------------
-// Volontairement simple (pas de vue mois/jour, pas de sync téléphone/Google,
-// pas de rappels de fêtes hébraïques) : ça reste la phase agenda complète,
-// discutée à part et pas encore commencée. Ici, juste de vraies tâches
-// persistées, groupées par échéance, qu'on peut ajouter/cocher depuis l'accueil.
+// Volontairement simple (pas de vue mois/jour, pas de sync téléphone/Google) :
+// ça reste la phase agenda complète, discutée à part et pas encore commencée.
+// Les rappels de fêtes hébraïques ont leur propre section (voir
+// hpHolidayPanel plus haut). Ici, juste de vraies tâches persistées,
+// groupées par échéance, qu'on peut ajouter/cocher depuis l'accueil.
 function taskDueInfo(t) {
   if (!t.dueDate) return { tone: "none", label: "" };
   const today = todayIso();
@@ -1733,6 +1885,7 @@ function handleAction(key) {
   if (key.startsWith("edit-payment:")) return openEditPayment(key.split(":")[1]);
   if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
   if (key.startsWith("add-installment:")) return openAddInstallment(key.split(":")[1]);
+  if (key.startsWith("holiday-prepare:")) return openHolidayModal(key.split(":")[1]);
   if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
 
   const actions = {
@@ -1782,6 +1935,14 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   dialogContent().querySelectorAll("[data-modal-close]").forEach(btn => btn.addEventListener("click", () => d.close()));
   wirePickers(dialogContent());
   wireCategoryAdders(dialogContent());
+  // Boutons "Copier" des modèles de message (stratégie des fêtes, et tout
+  // futur champ en lecture seule à copier-coller ailleurs).
+  dialogContent().querySelectorAll("[data-copy-target]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = dialogContent().querySelector(`#${btn.dataset.copyTarget}`);
+      if (target) copyFieldValue(target);
+    });
+  });
   // Une "Promesse" (don pas encore reçu) doit se voir proposer un statut
   // "En attente" par défaut plutôt que "Validé".
   const typeSelect = dialogContent().querySelector('select[name="type"]');
@@ -2067,6 +2228,16 @@ function submitForm(event) {
       t.recordId = data.recordId || null;
       t.assignedTo = (data.assignedTo || "").trim();
       logAudit(`Tâche modifiée : ${t.title}.`);
+      state.tab = "Tâches";
+    },
+    holidayTask: () => {
+      const h = JEWISH_HOLIDAYS.find(x => x.key === data.holidayKey);
+      if (!h) { notify("Fête introuvable"); return; }
+      const due = daysBeforeIso(h.date, 5);
+      const t = buildTask(`Envoyer les vœux de ${h.name} au portefeuille`, due, null);
+      if (!t) return;
+      tasks.unshift(t);
+      logAudit(`Tâche de relance créée pour ${h.name}.`);
       state.tab = "Tâches";
     },
     editPayment: () => {
