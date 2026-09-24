@@ -524,6 +524,7 @@ def rebuild_state_backup(db):
 # partir des données envoyées par le client (app.js) — le serveur ne stocke
 # rien de plus que ce qui existe déjà dans le CRM (payments/records).
 LOGO_PATH = ROOT / "assets" / "logo-sinai.png"
+SIGNATURE_PATH = ROOT / "assets" / "signatures" / "signature-yossef-pevzner.png"
 
 
 def amount_in_words_fr(amount):
@@ -726,6 +727,19 @@ def build_cerfa_pdf(payload):
     pdf.set_font("DejaVu", "B", 9.5)
     pdf.cell(page_w / 2, 5, date_long, align="R")
     y += 7
+
+    # Cachet/signature scannés, si le fichier a été fourni ; sinon on se
+    # contente du nom et de la fonction imprimés (fallback en attendant).
+    if SIGNATURE_PATH.exists():
+        try:
+            sig_w = 45
+            sig_h = sig_w * 427 / 1356  # ratio de l'image source
+            sig_x = 12 + page_w - sig_w
+            pdf.image(str(SIGNATURE_PATH), x=sig_x, y=y - 2, w=sig_w, h=sig_h)
+            y += sig_h + 1
+        except Exception:
+            pass
+
     pdf.set_xy(12 + page_w / 2, y)
     pdf.set_font("DejaVu", "I", 9)
     pdf.cell(page_w / 2, 5, entity.get("signatoryName", ""), align="R")

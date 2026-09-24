@@ -2293,7 +2293,7 @@ const RECEIPT_ENTITY = {
   objet: "Association d'intérêt général, éducative, sociale et culturelle",
   qualite: "Œuvre ou organisme d'intérêt général",
   signatoryName: "Joseph Pevzner",
-  signatoryTitle: "Le Président Adjoint",
+  signatoryTitle: "Directeur général",
 };
 // Libellés CERFA du mode de versement, à partir du moyen enregistré dans le CRM.
 const RECEIPT_METHOD_LABELS = { "CB": "Carte bancaire", "Chèque": "Chèque", "Virement": "Virement bancaire", "SEPA": "Prélèvement SEPA", "Espèces": "Espèces" };
