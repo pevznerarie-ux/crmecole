@@ -1632,13 +1632,19 @@ function receipts() {
   const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
   return `<div class="split"><section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Générer les reçus manquants", "generate-receipts", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
     ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p>
-    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th><th>PDF</th></tr></thead><tbody>${visible.map(p=>`<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td><td>${p.receiptNumber ? action("Télécharger", `download-receipt-pdf:${p.id}`) : "-"}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
-    <div class="record-cards mobile-only">${visible.map(p => `<div class="record-card" data-action="open-record:${p.recordId}:Paiements">
+    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th><th>PDF</th></tr></thead><tbody>${visible.map(p=>{
+      const externe = p.receipt === "Généré ailleurs";
+      return `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td><td class="row-actions">${externe ? `<span class="muted-note">Émis par l'ancien système</span>` : `${p.receiptNumber ? action("Télécharger", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer", `regenerate-receipt:${p.id}`)}`}</td></tr>`;
+    }).join("")}</tbody></table>${loadMore}</div>
+    <div class="record-cards mobile-only">${visible.map(p => {
+      const externe = p.receipt === "Généré ailleurs";
+      return `<div class="record-card" data-action="open-record:${p.recordId}:Paiements">
       <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
       <p>${p.receiptNumber || "Pas encore de numéro"}</p>
       <div class="chip-list">${status(p.receipt)}</div>
-      ${p.receiptNumber ? `<div class="row-actions">${action("Télécharger le PDF", `download-receipt-pdf:${p.id}`)}</div>` : ""}
-    </div>`).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
+      <div class="row-actions">${externe ? `<span class="muted-note">Émis par l'ancien système</span>` : `${p.receiptNumber ? action("Télécharger le PDF", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer le PDF", `regenerate-receipt:${p.id}`)}`}</div>
+    </div>`;
+    }).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
     </section><section class="panel pad">
       <span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2>
       <div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>
@@ -2082,6 +2088,7 @@ function handleAction(key) {
     return;
   }
   if (key.startsWith("download-receipt-pdf:")) return downloadReceiptPdf(key.split(":")[1]);
+  if (key.startsWith("regenerate-receipt:")) return regenerateReceipt(key.split(":")[1]);
   if (key.startsWith("quick-interaction:")) return openQuickForRecord(key.split(":")[1], "interaction");
   if (key.startsWith("quick-payment:")) return openQuickForRecord(key.split(":")[1], "payment");
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
@@ -2358,6 +2365,21 @@ async function downloadReceiptPdf(paymentId) {
   } catch (err) {
     notify("Impossible de générer le PDF du reçu");
   }
+}
+// Action "Régénérer" disponible sur chaque don/adhésion, indépendamment de
+// l'envoi par email (pas encore branché) : attribue un numéro si besoin,
+// journalise la (ré)émission dans le suivi comptable, puis télécharge tout
+// de suite le PDF pour qu'on puisse voir le résultat immédiatement.
+async function regenerateReceipt(paymentId) {
+  const p = payments.find(item => item.id === paymentId);
+  if (!p) { notify("Paiement introuvable"); return; }
+  if (p.receipt === "Généré ailleurs") { notify("Ce don a déjà un reçu émis par l'ancien système : pas de régénération pour éviter un doublon."); return; }
+  logReceiptGeneration(p);
+  logAudit(`Reçu régénéré manuellement pour ${p.payer} (${p.receiptNumber}).`);
+  saveCrmData();
+  render();
+  notify(`Reçu ${p.receiptNumber} régénéré`);
+  await downloadReceiptPdf(p.id);
 }
 // Enregistre une (re)génération de reçu : attribue le numéro s'il n'existe
 // pas encore, marque le paiement "Généré", et ajoute une ligne au suivi
