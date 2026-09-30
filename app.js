@@ -268,7 +268,7 @@ function currentCrmData() {
     state: { selectedRecord: state.selectedRecord },
     records, payments, imports, users, groups, interactions, linkages,
     customFields, receiptTemplates, savedViews, auditLog, interactionCategories, tasks,
-    holidayNotes, receiptLog,
+    holidayNotes, receiptLog, dismissedDuplicates,
   };
 }
 
@@ -320,6 +320,10 @@ const state = {
   // c'est ce deuxième cas qui doit, sur mobile, remplacer la liste par la
   // fiche au lieu de l'empiler tout en bas (voir styles.css, .mobile-detail-open).
   mobileDetailOpen: false,
+  // Onglet "Doublons potentiels" (tiroir) : recherche libre, et/ou focus sur
+  // les doublons d'une seule fiche (ouvert depuis son bouton "Voir les doublons").
+  dedupeQuery: "",
+  dedupeFocusId: null,
 };
 
 const PAGE_STEP = 80;
@@ -367,6 +371,12 @@ let holidayNotes = {};
 // régénérer un reçu réémet le même numéro, mais ajoute quand même une
 // nouvelle ligne ici pour tracer l'événement.
 let receiptLog = [];
+// Doublons détectés (même email ou même téléphone) qu'on a explicitement
+// marqués comme "ce ne sont pas de vrais doublons" (ex : un couple qui
+// partage un email) : la clé du groupe ("email:xxx@yyy.fr" ou
+// "phone:0601020304") est ajoutée ici pour que ce groupe ne réapparaisse
+// plus jamais dans l'onglet Doublons, même si l'email/téléphone reste identique.
+let dismissedDuplicates = [];
 
 const apps = [
   ["HelloAsso", "Collecter"], ["Stripe", "Collecter"], ["GoCardless", "Collecter"], ["iRaiser", "Collecter"],
@@ -461,6 +471,7 @@ function rebuildIndexes() {
     interactionsIndex.get(i.recordId).push(i);
   });
   interactionsIndex.forEach(list => list.sort((a, b) => (b.at || "").localeCompare(a.at || "")));
+  refreshDuplicateGroups();
 }
 
 function recordById(id) {
@@ -483,6 +494,88 @@ function recordPaymentsCount(r) {
 }
 function recordInteractionsCount(r) {
   return Number(r.importedInteractionsCount || 0) + recordLiveInteractions(r.id).length;
+}
+
+/* ---------- 4bis. Détection des doublons (même email / même téléphone) --- */
+
+// Normalise un numéro pour comparer "06 12 34 56 78", "06.12.34.56.78" et
+// "+33 6 12 34 56 78" comme le même numéro (sinon on rate plein de vrais
+// doublons juste à cause du format de saisie).
+function normalizePhoneKey(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("0033") && digits.length > 4) return "0" + digits.slice(4);
+  if (digits.startsWith("33") && digits.length > 2 && !digits.startsWith("0")) return "0" + digits.slice(2);
+  return digits;
+}
+function uniqueById(list) {
+  const seen = new Set();
+  return list.filter(r => { if (seen.has(r.id)) return false; seen.add(r.id); return true; });
+}
+// Un groupe = plusieurs fiches distinctes qui partagent le même email ou le
+// même téléphone (phone OU phone2). Quand exactement les mêmes fiches
+// partagent À LA FOIS le même email ET le même téléphone, on fusionne les
+// deux en une seule carte (sinon la même paire apparaîtrait deux fois dans
+// la liste). Les groupes explicitement écartés ("Nom séparé") ne sont plus
+// jamais recalculés/affichés, même si l'email/téléphone reste identique.
+function computeDuplicateGroups() {
+  const byEmail = new Map();
+  const byPhone = new Map();
+  records.forEach(r => {
+    const email = String(r.email || "").toLowerCase().trim();
+    if (email) { if (!byEmail.has(email)) byEmail.set(email, []); byEmail.get(email).push(r); }
+    [r.phone, r.phone2].forEach(raw => {
+      const key = normalizePhoneKey(raw);
+      if (key) { if (!byPhone.has(key)) byPhone.set(key, []); byPhone.get(key).push(r); }
+    });
+  });
+  const merged = new Map(); // clé = ids triés, valeur = { matchKeys, reasons, displays, records }
+  function addGroup(matchKey, reasonLabel, display, uniqList) {
+    const idSetKey = uniqList.map(r => r.id).sort().join(",");
+    if (!merged.has(idSetKey)) merged.set(idSetKey, { matchKeys: [], reasons: [], displays: [], records: uniqList });
+    const entry = merged.get(idSetKey);
+    entry.matchKeys.push(matchKey);
+    entry.reasons.push(reasonLabel);
+    entry.displays.push(display);
+  }
+  byEmail.forEach((list, value) => {
+    const uniq = uniqueById(list);
+    if (uniq.length > 1) addGroup(`email:${value}`, "même email", uniq[0].email || value, uniq);
+  });
+  byPhone.forEach((list, value) => {
+    const uniq = uniqueById(list);
+    if (uniq.length > 1) {
+      const withPhone = uniq.find(r => normalizePhoneKey(r.phone) === value);
+      addGroup(`phone:${value}`, "même téléphone", (withPhone && withPhone.phone) || value, uniq);
+    }
+  });
+  const groups = [];
+  merged.forEach(entry => {
+    // "key" (composite) sert d'identifiant unique pour les actions (fusionner/
+    // effacer/nom séparé) ; "matchKeys" liste les clés individuelles à écarter
+    // pour de bon quand on clique "Nom séparé".
+    groups.push({
+      key: entry.matchKeys.join("|"),
+      matchKeys: entry.matchKeys,
+      reason: entry.reasons.join(" et "),
+      display: entry.displays.join(" / "),
+      records: entry.records,
+    });
+  });
+  return groups.filter(g => !g.matchKeys.some(k => dismissedDuplicates.includes(k)));
+}
+// Recalculé une fois par rendu (voir rebuildIndexes) plutôt qu'à chaque
+// affichage de fiche, pour le même motif de performance que les index
+// records/payments/interactions juste au-dessus.
+let duplicateGroupsCache = [];
+function refreshDuplicateGroups() {
+  duplicateGroupsCache = computeDuplicateGroups();
+}
+function recordDuplicateGroups(id) {
+  return duplicateGroupsCache.filter(g => g.records.some(r => r.id === id));
+}
+function isRecordDuplicated(id) {
+  return recordDuplicateGroups(id).length > 0;
 }
 
 function nextId(prefix, list) {
@@ -1780,6 +1873,7 @@ function recordDetail(r) {
   const initial = r.kind === "Structure" ? "ST" : (r.first?.[0] || r.name?.[0] || "C");
   return `<aside class="panel detail-card">
     <div class="detail-head"><div class="avatar">${escapeHtml(initial)}</div><div><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div><button class="icon-btn detail-close" type="button" data-action="close-detail" title="Fermer et voir toute la liste">✕</button></div>
+    ${isRecordDuplicated(r.id) ? `<div class="dup-alert"><span>⚠ Doublon potentiel détecté</span>${action("Voir les doublons", `dedupe-focus:${r.id}`)}</div>` : ""}
     <div class="detail-kpis">
       <div><strong>${euro(recordTotalAmount(r))}</strong><span>Total</span></div>
       <div><strong>${recordPaymentsCount(r)}</strong><span>Paiements</span></div>
@@ -1932,17 +2026,60 @@ function renderDrawer() {
   drawerEl().className = "drawer open";
   const views = {
     actions: `<h2>Actions</h2>${action("Exporter la vue", "export-current", "primary-btn")}${action("Détecter les doublons", "dedupe")}${action("Fermer", "close-drawer")}`,
-    dedupe: `<h2>Doublons potentiels</h2><p>Fiches partageant le même email ou téléphone.</p>${duplicatesList()}${action("Fermer", "close-drawer")}`,
+    dedupe: `<h2>Doublons potentiels</h2>${dedupeDrawerBody()}${action("Fermer", "close-drawer")}`,
   };
   drawerEl().innerHTML = `<button class="drawer-close" type="button" data-action="close-drawer">✕</button>${views[state.drawer] || ""}`;
 }
 
-function duplicatesList() {
-  const byEmail = {};
-  records.forEach(r => { if (r.email) { const k = r.email.toLowerCase().trim(); (byEmail[k] = byEmail[k] || []).push(r); } });
-  const dups = Object.values(byEmail).filter(list => list.length > 1);
-  if (!dups.length) return emptyState("Aucun doublon d'email détecté.");
-  return `<div class="timeline">${dups.map(list => `<div class="timeline-item"><strong>${escapeHtml(list[0].email)}</strong><p>${list.map(r=>escapeHtml(r.name)).join(" · ")}</p></div>`).join("")}</div>`;
+// Tiroir "Doublons potentiels" : soit une recherche libre sur tous les
+// groupes détectés (ouvert depuis l'accueil/le menu Actions), soit, quand on
+// vient du bouton "Voir les doublons" d'une fiche précise, uniquement les
+// groupes qui concernent cette fiche-là (state.dedupeFocusId).
+function dedupeDrawerBody() {
+  const focusRecord = state.dedupeFocusId ? recordById(state.dedupeFocusId) : null;
+  const groups = focusRecord
+    ? duplicateGroupsCache.filter(g => g.records.some(r => r.id === focusRecord.id))
+    : filterDuplicateGroups(duplicateGroupsCache, state.dedupeQuery);
+  const searchBox = focusRecord ? "" : `<div class="toolbar thin"><input class="search" id="dedupeSearch" value="${escapeHtml(state.dedupeQuery)}" placeholder="Rechercher un nom, un email, un téléphone…" autocapitalize="off" autocorrect="off" spellcheck="false" /></div>`;
+  const header = focusRecord
+    ? `<p class="muted-note">Doublons potentiels pour <strong>${escapeHtml(focusRecord.name)}</strong>. ${action("← Voir tous les doublons", "dedupe-clear-focus")}</p>`
+    : `<p class="muted-note">${groups.length.toLocaleString("fr-FR")} doublon(s) potentiel(s)${duplicateGroupsCache.length !== groups.length ? ` sur ${duplicateGroupsCache.length.toLocaleString("fr-FR")} au total` : ""} (même email ou même téléphone).</p>`;
+  const body = groups.length
+    ? `<div class="dup-groups">${groups.map(g => dedupeGroupCard(g)).join("")}</div>`
+    : emptyState(state.dedupeQuery ? "Aucun doublon ne correspond à cette recherche." : "Aucun doublon détecté.");
+  return `${searchBox}${header}${body}`;
+}
+function filterDuplicateGroups(groups, query) {
+  const q = String(query || "").toLowerCase().trim();
+  if (!q) return groups;
+  return groups.filter(g => g.records.some(r =>
+    String(r.name || "").toLowerCase().includes(q) ||
+    String(r.email || "").toLowerCase().includes(q) ||
+    String(r.phone || "").toLowerCase().includes(q) ||
+    String(r.phone2 || "").toLowerCase().includes(q)
+  ));
+}
+function dedupeGroupCard(g) {
+  const label = g.reason.charAt(0).toUpperCase() + g.reason.slice(1);
+  return `<div class="dup-group">
+    <span class="eyebrow">${escapeHtml(label)} · ${escapeHtml(g.display)}</span>
+    ${g.records.map(r => dedupeRecordRow(r, g)).join("")}
+  </div>`;
+}
+function dedupeRecordRow(r, g) {
+  const keyEnc = encodeURIComponent(g.key);
+  return `<div class="dup-record-row">
+    <button type="button" class="dup-record-link" data-action="open-record:${r.id}">
+      <strong>${escapeHtml(r.name || "(sans nom)")}</strong>
+      <span>${r.kind}${r.email ? " · " + escapeHtml(r.email) : ""}${r.phone ? " · " + escapeHtml(r.phone) : ""}</span>
+      <span>${recordPaymentsCount(r)} paiement(s) · ${recordInteractionsCount(r)} interaction(s)${r.dateModified ? " · modifiée le " + escapeHtml(r.dateModified) : ""}</span>
+    </button>
+    <div class="row-actions">
+      ${action("Garder celle-ci et fusionner", `dedupe-merge:${keyEnc}§${r.id}`, "primary-btn")}
+      ${action("Nom séparé", `dedupe-separate:${keyEnc}§${r.id}`)}
+      ${action("Effacer", `dedupe-delete:${keyEnc}§${r.id}`)}
+    </div>
+  </div>`;
 }
 
 function bind() {
@@ -2040,6 +2177,14 @@ function bind() {
     next?.focus();
     next?.setSelectionRange(cursor, cursor);
   });
+  document.querySelector("#dedupeSearch")?.addEventListener("input", e => {
+    const cursor = e.target.selectionStart || e.target.value.length;
+    state.dedupeQuery = e.target.value;
+    render();
+    const next = document.querySelector("#dedupeSearch");
+    next?.focus();
+    next?.setSelectionRange(cursor, cursor);
+  });
 }
 
 function navigate(view, section) {
@@ -2111,6 +2256,14 @@ function handleAction(key) {
   if (key.startsWith("toggle-portfolio:")) return togglePortfolio(key.split(":")[1]);
   if (key === "add-to-portfolio") return openAddToPortfolioModal();
   if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
+  // Actions du tiroir "Doublons potentiels" : la clé du groupe (ex : "email:x@y.fr")
+  // est encodée (encodeURIComponent) puis suivie de "§<idFiche>", car la clé
+  // elle-même contient déjà des ":" (email/téléphone) qui casseraient un simple split(":").
+  if (key.startsWith("dedupe-merge:")) { const [gk, id] = key.slice("dedupe-merge:".length).split("§"); return mergeDuplicateGroup(decodeURIComponent(gk), id); }
+  if (key.startsWith("dedupe-separate:")) { const [gk, id] = key.slice("dedupe-separate:".length).split("§"); return separateDuplicateRecord(decodeURIComponent(gk), id); }
+  if (key.startsWith("dedupe-delete:")) { const [gk, id] = key.slice("dedupe-delete:".length).split("§"); return deleteDuplicateRecord(decodeURIComponent(gk), id); }
+  if (key.startsWith("dedupe-focus:")) { state.drawer = "dedupe"; state.dedupeFocusId = key.split(":")[1]; state.dedupeQuery = ""; render(); return; }
+  if (key === "dedupe-clear-focus") { state.dedupeFocusId = null; render(); return; }
 
   const actions = {
     "add-contact": () => openModal("contact"),
@@ -2131,7 +2284,7 @@ function handleAction(key) {
     "load-more-payments": () => { state.paymentsPage += PAGE_STEP; render(); },
     "open-actions": () => { state.drawer = "actions"; render(); },
     "close-drawer": () => { state.drawer = null; render(); },
-    "dedupe": () => { state.drawer = "dedupe"; render(); },
+    "dedupe": () => { state.drawer = "dedupe"; state.dedupeFocusId = null; state.dedupeQuery = ""; render(); },
     "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { logReceiptGeneration(p); n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
     "export-receipt-log": () => downloadCsv(`suivi-comptable-cerfa-${todayStr().replace(/\//g,"-")}.csv`, receiptLog),
     "edit-record": () => openModal("editRecord"),
@@ -2706,6 +2859,104 @@ function deleteSelectedRecord() {
   notify("Fiche supprimée");
 }
 
+/* ---------- 9bis. Résolution des doublons -------------------------------- */
+
+// "Garder celle-ci et fusionner" : toutes les autres fiches du groupe sont
+// absorbées dans la fiche choisie — leurs dons/tâches/interactions sont
+// réattribués (recordId), leurs compteurs d'historique importé avant le CRM
+// sont additionnés, les champs vides de la fiche gardée sont complétés avec
+// ceux des fiches fusionnées (sans jamais écraser une info déjà renseignée),
+// puis les autres fiches sont supprimées définitivement.
+function mergeDuplicateGroup(groupKey, keepId) {
+  const group = duplicateGroupsCache.find(g => g.key === groupKey);
+  if (!group) { notify("Ce groupe de doublons n'est plus à jour, réessaie."); return; }
+  const keep = recordById(keepId);
+  if (!keep) return notify("Fiche introuvable");
+  const others = group.records.filter(r => r.id !== keepId);
+  if (!others.length) return;
+  const names = others.map(r => r.name || r.id).join(", ");
+  const plural = others.length > 1;
+  const ok = window.confirm(`Fusionner ${names} dans "${keep.name}" ?\n\nTous les dons, tâches et interactions de ${plural ? "ces fiches" : "cette fiche"} seront transférés vers "${keep.name}", puis ${plural ? "elles seront supprimées" : "elle sera supprimée"} définitivement.\n\nCette action est irréversible.`);
+  if (!ok) return;
+  others.forEach(other => {
+    payments.forEach(p => { if (p.recordId === other.id) p.recordId = keep.id; });
+    interactions.forEach(i => { if (i.recordId === other.id) i.recordId = keep.id; });
+    tasks.forEach(t => { if (t.recordId === other.id) t.recordId = keep.id; });
+    linkages.forEach(l => { if (l.a === other.name) l.a = keep.name; if (l.b === other.name) l.b = keep.name; });
+    keep.importedAmount = Number(keep.importedAmount || 0) + Number(other.importedAmount || 0);
+    keep.importedAmount2025 = Number(keep.importedAmount2025 || 0) + Number(other.importedAmount2025 || 0);
+    keep.importedAmount2026 = Number(keep.importedAmount2026 || 0) + Number(other.importedAmount2026 || 0);
+    keep.importedPaymentsCount = Number(keep.importedPaymentsCount || 0) + Number(other.importedPaymentsCount || 0);
+    keep.importedInteractionsCount = Number(keep.importedInteractionsCount || 0) + Number(other.importedInteractionsCount || 0);
+    ["email", "secondaryEmails", "phone", "phone2", "address", "zip", "city", "country", "dob", "siren", "legal", "comment", "profession", "school", "family", "role"].forEach(f => {
+      if (!keep[f] && other[f]) keep[f] = other[f];
+    });
+    const idx = records.indexOf(other);
+    if (idx >= 0) records.splice(idx, 1);
+  });
+  keep.dateModified = todayStr();
+  if (others.some(o => o.id === state.selectedRecord)) state.selectedRecord = keep.id;
+  if (others.some(o => o.id === state.dedupeFocusId)) state.dedupeFocusId = keep.id;
+  logAudit(`Fiches fusionnées dans "${keep.name}" : ${names}.`);
+  saveCrmData();
+  render();
+  notify("Fiches fusionnées");
+}
+
+// "Effacer" une fiche doublon : contrairement à la suppression générale
+// (deleteSelectedRecord, qui laisse l'historique orphelin), ici on prévient
+// explicitement si des dons/interactions/tâches sont liés, et on les efface
+// avec la fiche pour ne rien laisser d'incohérent derrière.
+function deleteDuplicateRecord(groupKey, id) {
+  const record = recordById(id);
+  if (!record) return notify("Fiche introuvable");
+  const linkedPayments = recordLivePayments(id).length;
+  const linkedInteractions = recordLiveInteractions(id).length;
+  const linkedTasks = tasks.filter(t => t.recordId === id).length;
+  let message = `Supprimer définitivement "${record.name}" du CRM Sinaï ?\nCette action est irréversible.`;
+  if (linkedPayments || linkedInteractions || linkedTasks) {
+    const parts = [];
+    if (linkedPayments) parts.push(`${linkedPayments} paiement(s)`);
+    if (linkedInteractions) parts.push(`${linkedInteractions} interaction(s)`);
+    if (linkedTasks) parts.push(`${linkedTasks} tâche(s)`);
+    message = `"${record.name}" a ${parts.join(", ")} lié(s).\n\nLes supprimer aussi et effacer définitivement cette fiche ?\nCette action est irréversible.`;
+  }
+  if (!window.confirm(message)) return;
+  payments = payments.filter(p => p.recordId !== id);
+  interactions = interactions.filter(i => i.recordId !== id);
+  tasks = tasks.filter(t => t.recordId !== id);
+  const idx = records.indexOf(record);
+  if (idx >= 0) records.splice(idx, 1);
+  if (state.selectedRecord === id) state.selectedRecord = records[0]?.id || null;
+  if (state.dedupeFocusId === id) state.dedupeFocusId = null;
+  logAudit(`Fiche supprimée (doublon) : ${record.name}.`);
+  saveCrmData();
+  render();
+  notify("Fiche supprimée");
+}
+
+// "Nom séparé" : ce ne sont pas de vrais doublons (ex : un couple qui partage
+// un email/téléphone). On écarte définitivement ce groupe (il ne réapparaîtra
+// plus), puis on ouvre directement la fiche modifiable pour la renommer tout
+// de suite si besoin (via le formulaire standard "Modifier toute la fiche",
+// qui gère correctement prénom/nom — pas de logique de renommage dupliquée ici).
+function separateDuplicateRecord(groupKey, id) {
+  const record = recordById(id);
+  if (!record) return notify("Fiche introuvable");
+  // groupKey peut être composite ("email:x|phone:y") quand la même paire de
+  // fiches partageait à la fois le même email et le même téléphone : on écarte
+  // chaque clé individuelle pour que le groupe ne revienne pas par un autre biais.
+  String(groupKey || "").split("|").filter(Boolean).forEach(k => {
+    if (!dismissedDuplicates.includes(k)) dismissedDuplicates.push(k);
+  });
+  logAudit(`Doublon écarté : "${record.name}" marquée comme fiche distincte (pas un doublon).`);
+  state.selectedRecord = id;
+  saveCrmData();
+  render();
+  notify("Ces fiches ne seront plus signalées comme doublons");
+  openModal("editRecord");
+}
+
 function downloadCsv(filename, rows) {
   const clean = rows.map(r => { const c = { ...r }; delete c._backendId; delete c._createdAt; delete c._updatedAt; return c; });
   const list = clean.length ? clean : [{}];
@@ -3001,6 +3252,7 @@ async function bootApp() {
     tasks = Array.isArray(backup.tasks) ? backup.tasks : tasks;
     holidayNotes = (backup.holidayNotes && typeof backup.holidayNotes === "object") ? backup.holidayNotes : holidayNotes;
     receiptLog = Array.isArray(backup.receiptLog) ? backup.receiptLog : receiptLog;
+    dismissedDuplicates = Array.isArray(backup.dismissedDuplicates) ? backup.dismissedDuplicates : dismissedDuplicates;
     if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
       state.selectedRecord = backup.state.selectedRecord;
     }

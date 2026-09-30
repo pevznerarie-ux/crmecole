@@ -608,6 +608,19 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 
 .muted-note { margin: 2px 0 12px; color: var(--muted); font-size: 12.5px; font-style: italic; }
 
+/* ---------- Doublons : bannière sur une fiche + tiroir "Doublons potentiels" */
+
+.dup-alert { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 4px 0 10px; padding: 9px 12px; border-radius: var(--radius); background: var(--warn-soft); color: var(--warn); font-size: 13px; font-weight: 600; }
+.dup-alert button { background: var(--warn); border-color: var(--warn); color: #fff; white-space: nowrap; min-height: 32px; padding: 0 12px; }
+.dup-groups { display: grid; gap: 12px; }
+.dup-group { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; background: #fff; }
+.dup-group .eyebrow { display: block; margin-bottom: 8px; }
+.dup-record-row { padding: 10px 0; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.dup-record-row:first-of-type { border-top: none; padding-top: 0; }
+.dup-record-link { display: block; width: auto; height: auto; min-height: 0; text-align: left; background: transparent; border: none; padding: 0; }
+.dup-record-link:hover strong { color: var(--accent); }
+.dup-record-link span { display: block; color: var(--muted); font-size: 12.5px; font-weight: 400; }
+
 .section-sep { border: none; border-top: 1px solid var(--hp-line, #e5e0d8); margin: 20px 0; }
 
 .stacked-panels { display: flex; flex-direction: column; gap: 16px; }

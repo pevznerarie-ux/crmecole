@@ -32,6 +32,16 @@ COLLECTIONS = {
     "savedViews",
     "auditLog",
     "tasks",
+    # Ajoutés en même temps que la fonctionnalité "Doublons" : ces 3 champs
+    # existaient déjà côté app.js (currentCrmData/bootApp) mais n'étaient pas
+    # dans cette liste, donc jamais réellement persistés en base ni renvoyés
+    # par GET /api/state (seul le fichier JSON brut les recevait, jamais
+    # relu après le tout premier démarrage) — le journal comptable CERFA et
+    # les catégories d'interaction personnalisées revenaient donc à zéro/par
+    # défaut à chaque nouveau chargement de l'app sur un appareil. Corrigé ici.
+    "interactionCategories",
+    "receiptLog",
+    "dismissedDuplicates",
 }
 
 
@@ -322,6 +332,7 @@ def state_from_db():
             "version": 1,
             "savedAt": get_meta(db, "savedAt") or now_iso(),
             "state": json.loads(get_meta(db, "uiState") or "{}"),
+            "holidayNotes": json.loads(get_meta(db, "holidayNotes") or "{}"),
         }
         for collection in COLLECTIONS:
             rows = db.execute(
@@ -354,6 +365,13 @@ def write_state_to_db(db, data, merge_collections=None):
         db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
             ("uiState", json.dumps(data.get("state") or {}, ensure_ascii=False)),
+        )
+        # holidayNotes est un objet (clé = fête), pas une liste : il suit le
+        # même mécanisme que uiState plutôt que COLLECTIONS (qui attend des
+        # listes d'éléments).
+        db.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            ("holidayNotes", json.dumps(data.get("holidayNotes") or {}, ensure_ascii=False)),
         )
     target_collections = merge_collections if merge_collections is not None else COLLECTIONS
     for collection in target_collections:
@@ -506,6 +524,7 @@ def rebuild_state_backup(db):
         "version": 1,
         "savedAt": now_iso(),
         "state": json.loads(get_meta(db, "uiState") or "{}"),
+        "holidayNotes": json.loads(get_meta(db, "holidayNotes") or "{}"),
     }
     db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("savedAt", data["savedAt"]))
     for collection in COLLECTIONS:
