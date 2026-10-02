@@ -420,7 +420,19 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 
 .splash {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Comme .app-shell/.drawer/dialog (voir --vvh dans app.js) : sur mobile,
+     un "inset: 0" seul se dimensionne sur le viewport de mise en page, pas
+     sur la hauteur réellement visible au moment du chargement — quand la
+     barre d'adresse est encore dépliée, ça laissait un bandeau clair (fond
+     de la page, #f7f8fb) visible sous le dégradé sombre de l'écran de
+     démarrage. Même triple valeur de repli que les autres éléments plein
+     écran de l'appli pour rester fiable sur tous les navigateurs mobiles. */
+  height: 100vh;
+  height: 100dvh;
+  height: var(--vvh, 100dvh);
   z-index: 60;
   display: flex;
   flex-direction: column;
