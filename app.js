@@ -794,14 +794,18 @@ async function refreshAccounts() {
 // serait injouable avec 10 000+ fiches (rendu lent, impossible à parcourir).
 // On affiche un champ texte + une liste filtrée, et on stocke l'id choisi dans
 // un champ caché (recordId) — c'est ce champ que lisent les handlers d'envoi.
-function pickerField(label, name, selected, required = true) {
+function pickerField(label, name, selected, required = true, allowCreate = false) {
   const displayValue = selected ? selected.name : "";
   const idValue = selected ? selected.id : "";
-  return `<label class="span-2 picker-wrap" data-picker="${name}">${label}
+  const inner = `<label class="${allowCreate ? "" : "span-2 "}picker-wrap" data-picker="${name}">${label}
     <input type="text" class="picker-input" data-picker-input="${name}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Rechercher un nom, un email..." value="${escapeHtml(displayValue)}">
     <input type="hidden" name="${name}" data-picker-value="${name}" value="${escapeHtml(idValue)}"${required ? " required" : ""}>
     <div class="picker-results" data-picker-results="${name}"></div>
   </label>`;
+  if (!allowCreate) return inner;
+  // Bouton "+" pour créer un nouveau contact au vol si celui recherché
+  // n'existe pas encore (ex : lier une tâche à quelqu'un pas encore au CRM).
+  return `<div class="category-field-wrap span-2">${inner}<button type="button" class="icon-btn" data-picker-create="${name}" title="Créer un nouveau contact et le lier">+</button></div>`;
 }
 function wirePickers(root) {
   root.querySelectorAll("[data-picker-input]").forEach(input => {
@@ -843,6 +847,20 @@ function wirePickers(root) {
     input.addEventListener("click", selectAllSoon);
     input.addEventListener("input", () => { hidden.value = ""; showResults(input.value); });
     input.addEventListener("blur", () => setTimeout(() => results.classList.remove("open"), 120));
+  });
+  root.querySelectorAll("[data-picker-create]").forEach(btn => {
+    const key = btn.dataset.pickerCreate;
+    btn.addEventListener("click", () => {
+      const input = root.querySelector(`[data-picker-input="${key}"]`);
+      const hidden = root.querySelector(`[data-picker-value="${key}"]`);
+      const name = (window.prompt("Nom du nouveau contact (ex : Prénom Nom)", input ? input.value.trim() : "") || "").trim();
+      if (!name) return;
+      const rec = quickCreateContact(name);
+      if (!rec) return;
+      if (input) input.value = rec.name;
+      if (hidden) hidden.value = rec.id;
+      notify(`Contact "${rec.name}" créé et lié`);
+    });
   });
 }
 function emptyState(text, actionLabel, actionKey) {
@@ -937,7 +955,15 @@ function home() {
   // Tient compte des versements déjà reçus sur un paiement échelonné : un
   // don promis de 7 700 € dont 5 000 € sont déjà arrivés ne compte plus que
   // pour 2 700 € restants, pas pour son montant d'origine.
-  const outstanding = payments.filter(p => p.status === "Promis" && paymentRemaining(p) > 0);
+  // Les ~11 000 paiements importés avant le CRM n'utilisent jamais le statut
+  // littéral "Promis" (c'est un statut propre à l'appli) : ils portent des
+  // statuts historiques variés. On compte comme "en attente" les trois qui
+  // indiquent sans ambiguïté une promesse pas encore encaissée ("En attente
+  // d'envoi/de traitement/d'autorisation") — jamais "Paiement validé" ou
+  // "Chèque encaissé" (déjà reçus), ni "Paiement non effectué" (un paiement
+  // qui a échoué n'est pas une rentrée à venir).
+  const PENDING_STATUSES = new Set(["Promis", "En attente d'envoi", "En attente de traitement", "En attente d'autorisation"]);
+  const outstanding = payments.filter(p => PENDING_STATUSES.has(p.status) && paymentRemaining(p) > 0);
   const outstandingAmount = outstanding.reduce((s, p) => s + paymentRemaining(p), 0);
   const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
@@ -948,6 +974,10 @@ function home() {
   const todayLabel = now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   return `
     <div class="home-premium">
+      <div class="hp-brand-row">
+        <img class="hp-brand-logo" src="./assets/logo-sinai.png" alt="Sinaï">
+        <span class="hp-brand-tagline">Chaque famille compte. Chaque geste fait grandir Sinaï.</span>
+      </div>
       <div class="hp-topline">
         <span class="hp-eyebrow">Les institutions Sinaï</span>
         <span class="hp-date">${escapeHtml(todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1))}</span>
@@ -1318,6 +1348,8 @@ function hpTasksPanel() {
       </div>
       <input type="hidden" name="recordId" id="hpTaskRecordId" value="">
       <input type="date" name="dueDate" value="${todayIso()}">
+      <input type="time" name="dueTime" value="" title="Heure (si nécessaire)">
+      <button type="button" class="hp-task-link-btn" id="hpTaskCreateContact" title="Créer un nouveau contact et le lier à cette tâche">+ Contact</button>
       <button type="submit" class="hp-task-add" title="Ajouter">+</button>
       <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
     </form>
@@ -1346,6 +1378,7 @@ function hpTaskRow(t) {
     </div>
     <div class="hp-task-controls">
       <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
+      ${t.dueTime ? `<span class="hp-task-time-chip">${escapeHtml(t.dueTime)}</span>` : ""}
       ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
       <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
       <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
@@ -1364,7 +1397,8 @@ function openEditTask(id) {
     `<input type="hidden" name="taskId" value="${escapeHtml(t.id)}">
      ${field("Titre de la tâche", "title", t.title, "text", "required maxlength='140'")}
      ${field("Échéance", "dueDate", t.dueDate || "", "date")}
-     ${pickerField("Contact lié (optionnel)", "recordId", linked, false)}
+     ${field("Heure (si nécessaire)", "dueTime", t.dueTime || "", "time")}
+     ${pickerField("Contact lié (optionnel)", "recordId", linked, false, true)}
      ${field("Assigné à", "assignedTo", t.assignedTo || "")}`, "Enregistrer");
 }
 // Reconnaît un verbe d'action suivi d'un nom ("Contacter Dupont", "Relancer
@@ -1400,7 +1434,7 @@ function matchRecordsForTask(query) {
   scored.sort((a, b) => a.rank - b.rank || (a.r.name || "").localeCompare(b.r.name || "", "fr"));
   return scored.slice(0, 6).map(s => s.r);
 }
-function buildTask(title, dueDate, recordId) {
+function buildTask(title, dueDate, recordId, dueTime) {
   const clean = (title || "").trim();
   if (!clean) return null;
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
@@ -1409,6 +1443,7 @@ function buildTask(title, dueDate, recordId) {
     id: `T-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
     title: clean,
     dueDate: dueDate || "",
+    dueTime: dueTime || "",
     status: "à faire",
     assignedTo: me,
     createdBy: me,
@@ -1417,14 +1452,41 @@ function buildTask(title, dueDate, recordId) {
     recordId: linked ? linked.id : null,
   };
 }
-function addHomeTask(title, dueDate, recordId) {
-  const t = buildTask(title, dueDate, recordId);
+function addHomeTask(title, dueDate, recordId, dueTime) {
+  const t = buildTask(title, dueDate, recordId, dueTime);
   if (!t) return;
   tasks.unshift(t);
   const linked = t.recordId ? recordById(t.recordId) : null;
   logAudit(`Tâche ajoutée : ${t.title}${linked ? ` (liée à ${linked.name})` : ""}.`);
   saveCrmData();
   render();
+}
+// Création rapide d'un contact minimal depuis un champ de liaison (ex :
+// tâches) quand la personne recherchée n'existe pas encore dans le CRM —
+// évite d'interrompre la saisie en cours pour aller créer la fiche ailleurs.
+// Le contact est volontairement minimal (nom seulement) : à compléter
+// ensuite depuis sa fiche si besoin (email, téléphone...).
+function quickCreateContact(name) {
+  const clean = (name || "").trim();
+  if (!clean) return null;
+  const idx = clean.lastIndexOf(" ");
+  const first = idx > -1 ? clean.slice(0, idx).trim() : "";
+  const last = idx > -1 ? clean.slice(idx + 1).trim() : clean;
+  const record = {
+    id: nextId("C", records), kind: "Contact", civility: "", first, last, name: clean,
+    email: "", phone: "", tags: [], groups: [], segments: [],
+    importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0,
+    address: "", family: "", source: "Manuel", dateAdded: todayStr(),
+  };
+  records.unshift(record);
+  // recordById() lit l'index recordsIndex, reconstruit seulement au prochain
+  // render() complet : sans cette ligne, un buildTask() appelé juste après
+  // (ex. soumission immédiate du formulaire rapide d'accueil) ne retrouvait
+  // pas encore ce contact et liait la tâche à "aucun contact".
+  recordsIndex.set(record.id, record);
+  logAudit(`Contact créé rapidement depuis une tâche : ${record.name}.`);
+  saveCrmData();
+  return record;
 }
 // Marque une tâche faite / à refaire. On garde une trace dans le journal
 // d'activité et une date d'achèvement (completedAt) pour que les tâches
@@ -1490,7 +1552,7 @@ function maybeFireTaskNotification() {
   if (due.length) {
     try {
       const title = due.length === 1 ? "1 tâche à traiter" : `${due.length} tâches à traiter`;
-      const body = due.slice(0, 5).map(t => `• ${t.title}`).join("\n") + (due.length > 5 ? `\n… et ${due.length - 5} autre(s)` : "");
+      const body = due.slice(0, 5).map(t => `• ${t.title}${t.dueTime ? ` (${t.dueTime})` : ""}`).join("\n") + (due.length > 5 ? `\n… et ${due.length - 5} autre(s)` : "");
       new Notification(title, { body, icon: "./assets/icon-192.png" });
     } catch { /* notification indisponible sur cet appareil */ }
   }
@@ -2103,7 +2165,7 @@ function bind() {
     e.preventDefault();
     const form = e.target;
     const data = new FormData(form);
-    addHomeTask(data.get("title"), data.get("dueDate"), data.get("recordId"));
+    addHomeTask(data.get("title"), data.get("dueDate"), data.get("recordId"), data.get("dueTime"));
   });
   (() => {
     const titleInput = document.querySelector("#hpTaskTitle");
@@ -2112,6 +2174,17 @@ function bind() {
     const linkedBox = document.querySelector("#hpTaskLinked");
     const linkedName = document.querySelector("#hpTaskLinkedName");
     const unlinkBtn = document.querySelector("#hpTaskUnlink");
+    const createBtn = document.querySelector("#hpTaskCreateContact");
+    createBtn?.addEventListener("click", () => {
+      const name = (window.prompt("Nom du nouveau contact à lier (ex : Prénom Nom)") || "").trim();
+      if (!name) return;
+      const rec = quickCreateContact(name);
+      if (!rec) return;
+      if (recordIdInput) recordIdInput.value = rec.id;
+      if (linkedName) linkedName.textContent = rec.name || "";
+      if (linkedBox) linkedBox.hidden = false;
+      notify(`Contact "${rec.name}" créé et lié`);
+    });
     if (!titleInput || !suggestBox) return;
     titleInput.addEventListener("input", () => {
       if (recordIdInput) recordIdInput.value = "";
@@ -2373,7 +2446,8 @@ function openQuickForRecord(recordId, kind) {
   if (kind === "task") return modalShell("task", "Tâche pour " + r.name, "Ajouter une tâche",
     `${contactLockedField(r)}
      ${field("Titre de la tâche", "title", "", "text", "required placeholder='Ex : Relancer pour le renouvellement'")}
-     ${field("Échéance", "dueDate", todayIso(), "date")}`, "Ajouter la tâche");
+     ${field("Échéance", "dueDate", todayIso(), "date")}
+     ${field("Heure (si nécessaire)", "dueTime", "", "time")}`, "Ajouter la tâche");
   return modalShell("comment", "Commentaire sur " + r.name, "Ajouter un commentaire",
     `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
@@ -2737,7 +2811,7 @@ function submitForm(event) {
       navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
     },
     task: () => {
-      const t = buildTask(data.title, data.dueDate, data.recordId);
+      const t = buildTask(data.title, data.dueDate, data.recordId, data.dueTime);
       if (!t) return;
       tasks.unshift(t);
       const rec = t.recordId ? recordById(t.recordId) : null;
@@ -2751,6 +2825,7 @@ function submitForm(event) {
       if (!cleanTitle) { notify("Le titre ne peut pas être vide"); return; }
       t.title = cleanTitle;
       t.dueDate = data.dueDate || "";
+      t.dueTime = data.dueTime || "";
       t.recordId = data.recordId || null;
       t.assignedTo = (data.assignedTo || "").trim();
       logAudit(`Tâche modifiée : ${t.title}.`);

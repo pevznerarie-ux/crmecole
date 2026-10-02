@@ -833,6 +833,13 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   border-radius: 0 0 22px 22px;
   color: var(--hp-ink);
 }
+/* Le logo Sinaï est une bannière large (≈2259×776, pas une icône carrée) :
+   on fixe seulement sa largeur et on laisse la hauteur suivre, comme déjà
+   fait partout ailleurs où il apparaît (écran de connexion, barre latérale,
+   splash) — un cadre carré l'aurait écrasé en un mince filet illisible. */
+.hp-brand-row { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+.hp-brand-logo { width: 130px; height: auto; display: block; flex-shrink: 0; }
+.hp-brand-tagline { font-family: var(--hp-display); font-style: italic; font-size: 14px; color: var(--hp-rust-deep); line-height: 1.3; }
 .hp-topline { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
 .hp-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--hp-rust); }
 .hp-date { font-size: 12.5px; color: var(--hp-muted); font-style: italic; font-family: var(--hp-display); }
@@ -874,7 +881,9 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-task-linked strong { color: var(--hp-rust-deep); font-weight: 700; }
 .hp-task-linked button { border: none; background: transparent; color: var(--hp-muted); cursor: pointer; font-size: 12px; padding: 2px; }
 .hp-task-linked button:hover { color: var(--hp-rust-deep); }
-.hp-task-form input[type="date"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); flex: none; }
+.hp-task-form input[type="date"], .hp-task-form input[type="time"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); flex: none; }
+.hp-task-link-btn { flex: none; border: 1px dashed var(--hp-rust); border-radius: 10px; background: var(--hp-surface); color: var(--hp-rust); font-size: 11.5px; font-weight: 700; padding: 8px 10px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.hp-task-link-btn:hover { background: var(--hp-rust-soft); }
 .hp-task-add { width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--hp-rust); color: #fff9f2; font-size: 19px; line-height: 1; cursor: pointer; display: grid; place-items: center; transition: background .15s ease; }
 .hp-task-add:hover { background: var(--hp-rust-deep); }
 .hp-task-list { display: flex; flex-direction: column; }
@@ -891,6 +900,7 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-task-date-late { border-color: #e2a190; background: #fbe4de; color: #a13a1f; }
 .hp-task-date-today { border-color: var(--hp-rust); background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
 .hp-task-date-soon { border-color: #c9d2bd; background: #eef0e8; color: #566047; }
+.hp-task-time-chip { flex: none; font-size: 11px; color: var(--hp-muted); background: var(--hp-rust-soft); padding: 3px 7px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 .hp-task-assignee { font-size: 11px; color: var(--hp-muted); flex: none; }
 .hp-task-edit, .hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
 .hp-task-row:hover .hp-task-edit, .hp-task-row:hover .hp-task-remove { opacity: 1; }
@@ -968,13 +978,21 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .hp-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
-  .home-premium { margin: -16px -16px 0; padding: 20px 16px 28px; border-radius: 0 0 18px 18px; }
+  /* La page d'accueil est la seule à ajouter un padding bas ici — celui de
+     .content (96px, nécessaire partout pour dégager la barre de navigation
+     du bas) s'additionnait avec cette valeur et laissait une grande marge
+     blanche vide sous le contenu de l'accueil sur mobile. On la réduit au
+     minimum qui garde juste l'arrondi visuel de la carte. */
+  .home-premium { margin: -16px -16px 0; padding: 20px 16px 8px; border-radius: 0 0 18px 18px; }
+  .hp-brand-logo { width: 100px; }
+  .hp-brand-tagline { font-size: 12.5px; }
   .hp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hp-stat { padding: 16px; }
   .hp-stat:nth-child(2n+1) { border-left: none; }
   .hp-columns { grid-template-columns: 1fr; }
   .hp-tasks { padding: 16px; }
   .hp-task-input-wrap { flex-basis: 100%; }
+  .hp-task-link-btn { font-size: 10.5px; padding: 6px 8px; }
   .hp-task-assignee { display: none; }
   .hp-task-date { width: 100px; font-size: 10.5px; padding: 4px; }
   .hp-task-contact-chip { font-size: 10px; }
