@@ -371,7 +371,13 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .import-drop { width: calc(100% - 30px); margin: 15px; padding: 17px; border-radius: var(--radius-lg); border: 1px dashed var(--line-strong); background: var(--surface-alt); text-align: left; height: auto; }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 12px 16px; border-radius: var(--radius); background: var(--ink); color: #fff; box-shadow: var(--shadow); transform: translateY(18px); opacity: 0; pointer-events: none; transition: .2s ease; font-size: 13.5px; }
 .toast.show { transform: translateY(0); opacity: 1; }
-.drawer { position: fixed; top: 0; right: 0; z-index: 15; width: min(430px, 100vw); height: 100vh; height: 100dvh; height: var(--vvh, 100dvh); display: grid; align-content: start; gap: 12px; overflow: auto; padding: 26px; background: #fff; border-left: 1px solid var(--line); box-shadow: var(--shadow); transform: translateX(105%); transition: .22s ease; }
+/* z-index 19 (et non 15 comme avant) : passe au-dessus du bouton flottant "+"
+   (.fab, z-index 18) et de son menu/scrim, qui sinon restaient visibles et
+   cliquables par-dessus le bas du tiroir sur mobile — masquant par exemple le
+   bouton "Enregistrer comme segment" tout en bas du tiroir Filtres. Reste
+   sous .toast (20) pour qu'une notification déclenchée pendant que le tiroir
+   est ouvert (ex: juste après avoir enregistré un segment) reste visible. */
+.drawer { position: fixed; top: 0; right: 0; z-index: 19; width: min(430px, 100vw); height: 100vh; height: 100dvh; height: var(--vvh, 100dvh); display: grid; align-content: start; gap: 12px; overflow: auto; padding: 26px; background: #fff; border-left: 1px solid var(--line); box-shadow: var(--shadow); transform: translateX(105%); transition: .22s ease; }
 .drawer.open { transform: translateX(0); }
 .drawer-close { position: absolute; top: 15px; right: 15px; width: 36px; padding: 0; }
 .drawer h2 { padding-right: 42px; }
@@ -632,6 +638,26 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .dup-record-link { display: block; width: auto; height: auto; min-height: 0; text-align: left; background: transparent; border: none; padding: 0; }
 .dup-record-link:hover strong { color: var(--accent); }
 .dup-record-link span { display: block; color: var(--muted); font-size: 12.5px; font-weight: 400; }
+
+/* ---------- Filtres avancés (tiroir "Filtres" des Contacts/Structures) --- */
+
+.filters-btn { position: relative; }
+.filters-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 17px; height: 17px; margin-left: 6px; padding: 0 4px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700; vertical-align: middle; }
+
+.filter-group { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px 14px; margin: 0; background: #fff; }
+.filter-group + .filter-group { margin-top: 2px; }
+.filter-group legend { padding: 0 4px 0 0; color: var(--accent); text-transform: uppercase; font-size: 11px; letter-spacing: .08em; font-weight: 700; }
+.filter-checklist { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 6px; }
+.filter-check { display: flex !important; align-items: center; gap: 7px; grid-template-columns: unset; color: var(--ink-soft); font-size: 13px; font-weight: 500; cursor: pointer; }
+.filter-check input { min-height: 0; width: 16px; height: 16px; accent-color: var(--accent); }
+.filter-range-row, .filter-select-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-top: 6px; }
+.filter-drawer-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+
+/* ---------- Page Segments (dynamiques + historiques en texte libre) ----- */
+
+.segment-legacy { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.segment-legacy .chip-list button.tag { cursor: pointer; border: none; min-height: 0; }
+.segment-legacy .chip-list button.tag:hover { filter: brightness(0.96); }
 
 .section-sep { border: none; border-top: 1px solid var(--hp-line, #e5e0d8); margin: 20px 0; }
 
@@ -995,6 +1021,10 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
      du bas) s'additionnait avec cette valeur et laissait une grande marge
      blanche vide sous le contenu de l'accueil sur mobile. On la réduit au
      minimum qui garde juste l'arrondi visuel de la carte. */
+  /* 4 boutons ("Filtres", "Contact", "Structure", parfois "Voir la fiche") ne
+     tiennent plus sur une seule ligne sans s'écraser une fois "Filtres"
+     ajouté : on les laisse passer à la ligne plutôt que de les comprimer. */
+  .records-tools .row-actions { flex-wrap: wrap; }
   .home-premium { margin: -16px -16px 0; padding: 20px 16px 8px; border-radius: 0 0 18px 18px; }
   .hp-brand-logo { width: 100px; }
   .hp-brand-tagline { font-size: 12.5px; }

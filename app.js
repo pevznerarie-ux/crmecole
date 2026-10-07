@@ -21,6 +21,16 @@ const STORAGE_KEY = "sinai-crm-local-state-v2";
 const AUTH_TOKEN_KEY = "sinai-crm-auth-token";
 const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:8766" : "";
 const AUDIT_LIMIT = 200;
+// Statuts de paiement considérés "en attente" (promesse pas encore encaissée) :
+// "Promis" est le seul statut littéral utilisé par l'appli elle-même : les
+// ~11 000 paiements importés avant le CRM portent des statuts historiques
+// variés, dont trois indiquent sans ambiguïté une promesse pas encore
+// arrivée ("En attente d'envoi/de traitement/d'autorisation") — jamais
+// "Paiement validé" ou "Chèque encaissé" (déjà reçus), ni "Paiement non
+// effectué" (un paiement qui a échoué n'est pas une rentrée à venir).
+// Utilisé à la fois par le KPI "Reste à payer" de l'accueil et par le
+// filtre "Déjà payé / En attente" du moteur de recherche des contacts.
+const PENDING_PAYMENT_STATUSES = new Set(["Promis", "En attente d'envoi", "En attente de traitement", "En attente d'autorisation"]);
 
 // ---- Hauteur réelle visible sur mobile (clavier compris) -------------------
 // `100dvh` ne suffit pas : par spécification CSS, les unités "dvh" tiennent
@@ -324,9 +334,44 @@ const state = {
   // les doublons d'une seule fiche (ouvert depuis son bouton "Voir les doublons").
   dedupeQuery: "",
   dedupeFocusId: null,
+  // Filtres avancés du répertoire (Contacts/Structures) : voir defaultFilters()
+  // pour le détail des critères, et recordMatchesFilters() pour leur application.
+  filters: null,
 };
 
 const PAGE_STEP = 80;
+
+// Filtres avancés disponibles sur le répertoire (Contacts/Structures), en plus
+// de la recherche libre : montant total donné, récurrence (plusieurs années
+// différentes), campus déduit des étiquettes BM/BH, année de don, type de
+// paiement, occasion, et statut payé/en attente. Toutes les listes vides =
+// aucun filtre actif sur ce critère (tout passe).
+function defaultFilters() {
+  return {
+    amountMin: "",
+    amountMax: "",
+    recurring: "", // "" (indifférent) | "yes" | "no"
+    campuses: [], // sous-ensemble de ["Beth Mena'hem", "Beth Hilel"]
+    years: [], // années (chaînes) déduites des paiements
+    paymentTypes: [], // sous-ensemble de PAYMENT_TYPE_OPTIONS
+    occasions: [], // valeurs libres de payment.occasion (vide dans les données historiques)
+    payStatus: [], // sous-ensemble de ["paye", "attente"]
+    segments: [], // étiquettes de record.segments (segments "historiques" en texte libre)
+  };
+}
+function activeFilters() {
+  if (!state.filters) state.filters = defaultFilters();
+  return state.filters;
+}
+function filtersAreActive(f) {
+  return !!(f.amountMin || f.amountMax || f.recurring || f.campuses.length || f.years.length || f.paymentTypes.length || f.occasions.length || f.payStatus.length || f.segments.length);
+}
+function activeFilterCount(f) {
+  return [f.amountMin, f.amountMax, f.recurring].filter(Boolean).length
+    + f.campuses.length + f.years.length + f.paymentTypes.length + f.occasions.length + f.payStatus.length + f.segments.length;
+}
+const PAYMENT_TYPE_OPTIONS = ["Don", "Adhésion", "Billetterie"];
+const CAMPUS_OPTIONS = ["Beth Mena'hem", "Beth Hilel"];
 
 function visiblePage(allRows, pageKey) {
   const limit = state[pageKey] || PAGE_STEP;
@@ -455,13 +500,44 @@ let recordsIndex = new Map();
 let paymentsIndex = new Map();
 let interactionsIndex = new Map();
 
+// Index par fiche, construits une seule fois par rendu (comme paymentsIndex),
+// pour que les filtres avancés (année, type, occasion, statut payé/en attente,
+// récurrence) restent rapides même avec ~11 000 paiements : years/paymentTypes/
+// occasions sont des Set (une fiche peut avoir donné plusieurs années ou
+// plusieurs types), payStatus distingue juste "au moins un paiement payé" /
+// "au moins un en attente" pour cette fiche.
+let recordYearsIndex = new Map();
+let recordOccasionsIndex = new Map();
+let recordPaymentTypesIndex = new Map();
+let recordPayStatusIndex = new Map();
+
 function rebuildIndexes() {
   recordsIndex = new Map(records.map(r => [r.id, r]));
   paymentsIndex = new Map();
+  recordYearsIndex = new Map();
+  recordOccasionsIndex = new Map();
+  recordPaymentTypesIndex = new Map();
+  recordPayStatusIndex = new Map();
   payments.forEach(p => {
     if (!p.recordId) return;
     if (!paymentsIndex.has(p.recordId)) paymentsIndex.set(p.recordId, []);
     paymentsIndex.get(p.recordId).push(p);
+    const year = paymentYear(p);
+    if (year) {
+      if (!recordYearsIndex.has(p.recordId)) recordYearsIndex.set(p.recordId, new Set());
+      recordYearsIndex.get(p.recordId).add(year);
+    }
+    (p.occasion || []).forEach(o => {
+      if (!o) return;
+      if (!recordOccasionsIndex.has(p.recordId)) recordOccasionsIndex.set(p.recordId, new Set());
+      recordOccasionsIndex.get(p.recordId).add(o);
+    });
+    if (p.type) {
+      if (!recordPaymentTypesIndex.has(p.recordId)) recordPaymentTypesIndex.set(p.recordId, new Set());
+      recordPaymentTypesIndex.get(p.recordId).add(p.type);
+    }
+    if (!recordPayStatusIndex.has(p.recordId)) recordPayStatusIndex.set(p.recordId, new Set());
+    recordPayStatusIndex.get(p.recordId).add(paymentPayStatus(p));
   });
   paymentsIndex.forEach(list => list.sort((a, b) => (b.at || "").localeCompare(a.at || "")));
   interactionsIndex = new Map();
@@ -494,6 +570,57 @@ function recordPaymentsCount(r) {
 }
 function recordInteractionsCount(r) {
   return Number(r.importedInteractionsCount || 0) + recordLiveInteractions(r.id).length;
+}
+
+// Année d'un paiement, pour le filtre "Année" : même logique que
+// paymentPrimaryDate (date de paiement réelle si reçu, sinon date de la
+// promesse, sinon l'ancienne date de saisie historique au format "JJ/MM/AAAA").
+// paymentDate/promiseDate sont au format ISO ("AAAA-MM-JJ") ; p.date (import
+// historique, ~11 000 paiements) est toujours "JJ/MM/AAAA" — on en extrait les
+// 4 derniers chiffres plutôt que de supposer un séparateur précis.
+function paymentYear(p) {
+  if (p.status === "Reçu" && p.paymentDate) return p.paymentDate.slice(0, 4);
+  if (p.promiseDate) return p.promiseDate.slice(0, 4);
+  const match = String(p.date || "").match(/(\d{4})\s*$/);
+  return match ? match[1] : "";
+}
+// Regroupe les statuts de paiement, très divers dans les données historiques,
+// en deux catégories simples pour le filtre "Déjà payé / En attente" : un
+// paiement en attente (PENDING_PAYMENT_STATUSES) reste "attente" ; tout le
+// reste (validé, encaissé, "Reçu"...) est compté "payé" — y compris un
+// paiement historique "Paiement non effectué", qui n'est ni une rentrée à
+// venir ni, au sens strict, "en attente" : on ne le fait pas remonter dans un
+// des deux groupes faute d'un troisième statut demandé par l'utilisateur.
+function paymentPayStatus(p) {
+  return PENDING_PAYMENT_STATUSES.has(p.status) ? "attente" : "paye";
+}
+// Campus déduit des étiquettes de la fiche (PSBM/AESBM/PSBH/AESBH, etc.) :
+// record.school n'est jamais rempli dans les vraies données, alors que ces
+// codes d'étiquette le sont déjà. "BM" = Beth Mena'hem, "BH" = Beth Hilel.
+function recordCampuses(r) {
+  const found = new Set();
+  (r.tags || []).forEach(t => {
+    const up = String(t).toUpperCase();
+    if (up.includes("BM")) found.add("Beth Mena'hem");
+    if (up.includes("BH")) found.add("Beth Hilel");
+  });
+  return [...found];
+}
+// "Récurrent" = a donné sur au moins deux années civiles différentes.
+function recordIsRecurring(r) {
+  return (recordYearsIndex.get(r.id) || new Set()).size >= 2;
+}
+function recordPaymentYears(r) {
+  return [...(recordYearsIndex.get(r.id) || [])];
+}
+function recordOccasions(r) {
+  return [...(recordOccasionsIndex.get(r.id) || [])];
+}
+function recordPaymentTypes(r) {
+  return [...(recordPaymentTypesIndex.get(r.id) || [])];
+}
+function recordPayStatuses(r) {
+  return [...(recordPayStatusIndex.get(r.id) || [])];
 }
 
 /* ---------- 4bis. Détection des doublons (même email / même téléphone) --- */
@@ -886,9 +1013,37 @@ function notify(message) {
 
 /* ---------- 6. Rendu des vues -------------------------------------------- */
 
-function filteredRecords() {
-  const q = state.query.toLowerCase();
-  return records.filter(r => !q || [r.id, r.kind, r.name, r.email, r.phone, r.address, r.city, ...(r.tags || []), ...(r.groups || [])].join(" ").toLowerCase().includes(q));
+// recordMatchesFilters() applique les filtres avancés du tiroir "Filtres"
+// (montant, récurrence, campus, année, type de paiement, occasion, statut
+// payé/en attente) ainsi que les segments (dynamiques ou historiques en texte
+// libre). Chaque critère vide = indifférent (ne restreint rien) ; plusieurs
+// valeurs cochées dans une même liste (ex : deux campus) sont en "OU" entre
+// elles, et les critères entre eux sont en "ET".
+function recordMatchesFilters(r, f) {
+  if (!f || !filtersAreActive(f)) return true;
+  if (f.amountMin && recordTotalAmount(r) < Number(f.amountMin)) return false;
+  if (f.amountMax && recordTotalAmount(r) > Number(f.amountMax)) return false;
+  if (f.recurring === "yes" && !recordIsRecurring(r)) return false;
+  if (f.recurring === "no" && recordIsRecurring(r)) return false;
+  if (f.campuses.length && !recordCampuses(r).some(c => f.campuses.includes(c))) return false;
+  if (f.years.length && !recordPaymentYears(r).some(y => f.years.includes(y))) return false;
+  if (f.paymentTypes.length && !recordPaymentTypes(r).some(t => f.paymentTypes.includes(t))) return false;
+  if (f.occasions.length && !recordOccasions(r).some(o => f.occasions.includes(o))) return false;
+  if (f.payStatus.length && !recordPayStatuses(r).some(s => f.payStatus.includes(s))) return false;
+  if (f.segments.length && !(r.segments || []).some(s => f.segments.includes(s))) return false;
+  return true;
+}
+// queryOverride/filtersOverride permettent de recalculer le nombre de fiches
+// correspondant à un segment enregistré (segmentMatchCount) sans toucher à
+// l'état global affiché (state.query/state.filters) pendant qu'on construit
+// la page Segments.
+function filteredRecords(queryOverride, filtersOverride) {
+  const q = (queryOverride !== undefined ? queryOverride : state.query).toLowerCase();
+  const f = filtersOverride !== undefined ? filtersOverride : activeFilters();
+  return records.filter(r =>
+    (!q || [r.id, r.kind, r.name, r.email, r.phone, r.address, r.city, ...(r.tags || []), ...(r.groups || [])].join(" ").toLowerCase().includes(q))
+    && recordMatchesFilters(r, f)
+  );
 }
 function filteredPayments(type) {
   const q = state.query.toLowerCase();
@@ -962,8 +1117,7 @@ function home() {
   // d'envoi/de traitement/d'autorisation") — jamais "Paiement validé" ou
   // "Chèque encaissé" (déjà reçus), ni "Paiement non effectué" (un paiement
   // qui a échoué n'est pas une rentrée à venir).
-  const PENDING_STATUSES = new Set(["Promis", "En attente d'envoi", "En attente de traitement", "En attente d'autorisation"]);
-  const outstanding = payments.filter(p => PENDING_STATUSES.has(p.status) && paymentRemaining(p) > 0);
+  const outstanding = payments.filter(p => PENDING_PAYMENT_STATUSES.has(p.status) && paymentRemaining(p) > 0);
   const outstandingAmount = outstanding.reduce((s, p) => s + paymentRemaining(p), 0);
   const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
   const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
@@ -1667,6 +1821,77 @@ function portfolioViewRow({ r, days, tone }) {
   </div>`;
 }
 
+// Bouton "Filtres" du répertoire, avec un badge indiquant le nombre de
+// critères actifs pour qu'on voie d'un coup d'œil si un filtre oublié est
+// encore appliqué.
+function filtersButton() {
+  const n = activeFilterCount(activeFilters());
+  return `<button type="button" class="top-btn filters-btn" data-action="open-filters">Filtres${n ? `<span class="filters-badge">${n}</span>` : ""}</button>`;
+}
+// Valeurs distinctes réellement présentes dans les données, pour ne proposer
+// dans les filtres que des cases qui peuvent effectivement correspondre à
+// quelque chose (ex : pas la peine d'afficher "2031" si aucun don n'existe
+// cette année-là).
+function distinctPaymentYears() {
+  const years = new Set();
+  payments.forEach(p => { const y = paymentYear(p); if (y) years.add(y); });
+  return [...years].sort((a, b) => b.localeCompare(a));
+}
+function distinctOccasions() {
+  const vals = new Set();
+  payments.forEach(p => (p.occasion || []).forEach(o => { if (o) vals.add(o); }));
+  return [...vals].sort((a, b) => a.localeCompare(b, "fr"));
+}
+function distinctLegacySegmentTags() {
+  const vals = new Set();
+  records.forEach(r => (r.segments || []).forEach(s => { if (s) vals.add(s); }));
+  return [...vals].sort((a, b) => a.localeCompare(b, "fr"));
+}
+// Un groupe de cases à cocher générique (campus, année, type, occasion,
+// statut, segments historiques) : chaque case coche/décoche une valeur dans
+// state.filters[key] (tableau), avec le libellé optionnel distinct de la
+// valeur brute (ex : "paye" -> "Déjà payé").
+function filterCheckGroup(legend, key, options, labelFn) {
+  const selected = activeFilters()[key] || [];
+  if (!options.length) return "";
+  return `<fieldset class="filter-group" data-filter-key="${key}">
+    <legend>${escapeHtml(legend)}</legend>
+    <div class="filter-checklist">${options.map(o => `<label class="filter-check"><input type="checkbox" data-filter="${key}" value="${escapeHtml(o)}" ${selected.includes(o) ? "checked" : ""}> ${escapeHtml(labelFn ? labelFn(o) : o)}</label>`).join("")}</div>
+  </fieldset>`;
+}
+function filtersDrawerBody() {
+  const f = activeFilters();
+  const payStatusLabels = { paye: "Déjà payé", attente: "En attente" };
+  return `<p class="muted-note">Affine la liste des contacts/structures ci-dessous. Les critères se combinent (ET), et peuvent ensuite être enregistrés comme segment réutilisable.</p>
+    <fieldset class="filter-group">
+      <legend>Montant total donné</legend>
+      <div class="filter-range-row">
+        <label>Min<input type="text" inputmode="numeric" pattern="[0-9]*" data-filter-amount="amountMin" value="${escapeHtml(f.amountMin)}" placeholder="0 €"></label>
+        <label>Max<input type="text" inputmode="numeric" pattern="[0-9]*" data-filter-amount="amountMax" value="${escapeHtml(f.amountMax)}" placeholder="Sans max"></label>
+      </div>
+    </fieldset>
+    <fieldset class="filter-group">
+      <legend>Récurrence</legend>
+      <div class="filter-select-row">
+        <select data-filter-select="recurring">
+          <option value="" ${!f.recurring ? "selected" : ""}>Indifférent</option>
+          <option value="yes" ${f.recurring === "yes" ? "selected" : ""}>Donateur récurrent (2 années ou plus)</option>
+          <option value="no" ${f.recurring === "no" ? "selected" : ""}>Don ponctuel (une seule année)</option>
+        </select>
+      </div>
+    </fieldset>
+    ${filterCheckGroup("École / campus", "campuses", CAMPUS_OPTIONS)}
+    ${filterCheckGroup("Année de don", "years", distinctPaymentYears())}
+    ${filterCheckGroup("Type de paiement", "paymentTypes", PAYMENT_TYPE_OPTIONS)}
+    ${filterCheckGroup("Occasion", "occasions", distinctOccasions())}
+    ${filterCheckGroup("Statut du paiement", "payStatus", ["paye", "attente"], v => payStatusLabels[v] || v)}
+    ${filterCheckGroup("Segment historique (étiquette libre)", "segments", distinctLegacySegmentTags())}
+    <div class="filter-drawer-actions">
+      ${action("Réinitialiser les filtres", "reset-filters-only")}
+      ${action("Enregistrer comme segment", "save-segment", "primary-btn")}
+    </div>`;
+}
+
 function recordsView(kind) {
   const rows = filteredRecords().filter(r => !kind || r.kind === kind);
   if (!rows.length && !records.length) {
@@ -1696,7 +1921,7 @@ function recordsView(kind) {
       </div>
       <div class="toolbar records-tools">
         <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="Rechercher un nom, un email ou une ville" autocapitalize="off" autocorrect="off" spellcheck="false" />
-        <div class="row-actions">${action("Contact", "add-contact", "primary-btn")} ${action("Structure", "add-structure")}${showDetail ? "" : (rows.length ? action("Voir la fiche", "open-detail") : "")}</div>
+        <div class="row-actions">${filtersButton()}${action("Contact", "add-contact", "primary-btn")} ${action("Structure", "add-structure")}${showDetail ? "" : (rows.length ? action("Voir la fiche", "open-detail") : "")}</div>
       </div>
       <div class="table-wrap desktop-only"><table class="records-table">
       <thead><tr><th>Nom</th><th>ID</th><th>Email</th><th>Téléphone</th><th>Étiquettes</th><th>Montant total</th><th>Interactions</th></tr></thead>
@@ -1713,11 +1938,77 @@ function recordsView(kind) {
   </div>`;
 }
 
+// Nombre de fiches correspondant à un segment enregistré, recalculé à chaque
+// affichage de la page (donc toujours à jour) sans toucher aux filtres/à la
+// recherche réellement affichés ailleurs (filteredRecords accepte des
+// overrides pour ça).
+function segmentMatchCount(seg) {
+  return filteredRecords("", { ...defaultFilters(), ...(seg.filters || {}) }).length;
+}
+// Résumé lisible des critères d'un segment enregistré, pour la page Segments
+// (ex : "Montant ≥ 100 € · Récurrent · Beth Mena'hem · 2023, 2024").
+function summarizeSegmentCriteria(f) {
+  const parts = [];
+  if (f.amountMin) parts.push(`Montant ≥ ${euro(f.amountMin)}`);
+  if (f.amountMax) parts.push(`Montant ≤ ${euro(f.amountMax)}`);
+  if (f.recurring === "yes") parts.push("Récurrent");
+  if (f.recurring === "no") parts.push("Ponctuel");
+  if (f.campuses?.length) parts.push(f.campuses.join(", "));
+  if (f.years?.length) parts.push(f.years.join(", "));
+  if (f.paymentTypes?.length) parts.push(f.paymentTypes.join(", "));
+  if (f.occasions?.length) parts.push(f.occasions.join(", "));
+  if (f.payStatus?.length) parts.push(f.payStatus.map(s => ({ paye: "Déjà payé", attente: "En attente" }[s] || s)).join(", "));
+  if (f.segments?.length) parts.push(`Étiquette : ${f.segments.join(", ")}`);
+  return parts.length ? parts.join(" · ") : "Aucun critère";
+}
+// Ouvre Contacts avec les filtres d'un segment enregistré (dynamique) déjà
+// appliqués — navigate() accepte un override de filtres pour ça, justement
+// pour ne pas reproduire l'ancien comportement (une simple recherche texte)
+// qui ratait toute fiche ne contenant pas littéralement le nom du segment.
+function applySegment(seg) {
+  navigate("crm", "Contacts", { ...defaultFilters(), ...(seg.filters || {}) });
+}
+// Enregistre les filtres actuellement cochés dans le tiroir "Filtres" comme
+// segment réutilisable (savedViews, déjà persisté mais jusqu'ici inutilisé).
+// Demande au moins un critère pour éviter d'enregistrer un segment vide (qui
+// correspondrait silencieusement à "toutes les fiches").
+function saveCurrentFiltersAsSegment() {
+  const f = activeFilters();
+  if (!filtersAreActive(f)) { notify("Cochez au moins un critère avant d'enregistrer un segment"); return; }
+  const name = (window.prompt("Nom du segment (ex : \"Donateurs récurrents Beth Mena'hem\")") || "").trim();
+  if (!name) return;
+  savedViews.push({ id: nextId("SEG", savedViews), name, filters: { ...f }, createdAt: new Date().toISOString() });
+  logAudit(`Segment enregistré : ${name}.`);
+  saveCrmData();
+  notify(`Segment "${name}" enregistré`);
+  render();
+}
+function deleteSavedSegment(id) {
+  const seg = savedViews.find(s => s.id === id);
+  if (!seg) return;
+  if (!window.confirm(`Supprimer le segment "${seg.name}" ?`)) return;
+  savedViews = savedViews.filter(s => s.id !== id);
+  logAudit(`Segment supprimé : ${seg.name}.`);
+  saveCrmData();
+  render();
+}
 function segments() {
-  const known = new Set();
-  records.forEach(r => (r.segments || []).forEach(s => known.add(s)));
-  const rows = [...known].map(s => [s, `apply-segment:${s}`]);
-  return panelList("Segments détectés dans les fiches", rows.length ? rows : [], "Créer un segment sur une fiche", "goto-contacts");
+  const legacyTags = distinctLegacySegmentTags();
+  return `<section class="panel pad">
+    <div class="toolbar"><h2>Segments enregistrés</h2>${action("Enregistrer comme segment", "save-segment", "primary-btn")}</div>
+    <p class="muted-note">Créés depuis le tiroir "Filtres" des Contacts (montant, récurrence, campus, année, type de paiement, occasion, statut) — le nombre de fiches correspondant est toujours recalculé à jour.</p>
+    ${savedViews.length ? `<div class="table-wrap"><table><thead><tr><th>Nom</th><th>Critères</th><th>Fiches</th><th>Créé le</th><th></th></tr></thead><tbody>${savedViews.map(seg => `<tr>
+        <td><strong>${escapeHtml(seg.name)}</strong></td>
+        <td>${escapeHtml(summarizeSegmentCriteria(seg.filters || {}))}</td>
+        <td>${segmentMatchCount(seg).toLocaleString("fr-FR")}</td>
+        <td>${seg.createdAt ? formatFrDateFull(seg.createdAt.slice(0, 10)) : "-"}</td>
+        <td class="row-actions">${action("Appliquer", `apply-saved-segment:${seg.id}`, "primary-btn")}${action("Supprimer", `delete-saved-segment:${seg.id}`)}</td>
+      </tr>`).join("")}</tbody></table></div>` : emptyState("Aucun segment enregistré pour l'instant. Ouvrez le tiroir \"Filtres\" depuis Contacts, choisissez vos critères, puis \"Enregistrer comme segment\".", "Aller aux contacts", "goto-contacts")}
+    ${legacyTags.length ? `<div class="segment-legacy">
+      <span class="eyebrow">Segments historiques (étiquette libre, importés)</span>
+      <div class="chip-list">${legacyTags.map(s => `<button type="button" class="tag" data-action="apply-legacy-segment:${encodeURIComponent(s)}">${escapeHtml(s)}</button>`).join("")}</div>
+    </div>` : ""}
+  </section>`;
 }
 
 function groupsView() {
@@ -2089,6 +2380,7 @@ function renderDrawer() {
   const views = {
     actions: `<h2>Actions</h2>${action("Exporter la vue", "export-current", "primary-btn")}${action("Détecter les doublons", "dedupe")}${action("Fermer", "close-drawer")}`,
     dedupe: `<h2>Doublons potentiels</h2>${dedupeDrawerBody()}${action("Fermer", "close-drawer")}`,
+    filters: `<h2>Filtres</h2>${filtersDrawerBody()}${action("Fermer", "close-drawer")}`,
   };
   drawerEl().innerHTML = `<button class="drawer-close" type="button" data-action="close-drawer">✕</button>${views[state.drawer] || ""}`;
 }
@@ -2149,6 +2441,7 @@ function bind() {
     state.view = el.dataset.view;
     state.section = el.dataset.section || titles[state.view][0];
     state.query = "";
+    state.filters = defaultFilters();
     state.drawer = null;
     state.showDetail = true;
     state.mobileDetailOpen = false;
@@ -2160,6 +2453,39 @@ function bind() {
   document.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
   document.querySelectorAll("[data-category-index]").forEach(el => {
     el.addEventListener("change", () => { renameInteractionCategory(Number(el.dataset.categoryIndex), el.value); render(); });
+  });
+  // Tiroir "Filtres" (Contacts/Structures) : chaque case/menu/montant met à
+  // jour state.filters puis redessine tout (liste filtrée + badge du bouton
+  // "Filtres" + le tiroir lui-même, qui reste ouvert puisque state.drawer
+  // n'est pas touché ici).
+  document.querySelectorAll("[data-filter]").forEach(el => {
+    el.addEventListener("change", () => {
+      const key = el.dataset.filter;
+      const f = activeFilters();
+      const list = new Set(f[key] || []);
+      if (el.checked) list.add(el.value); else list.delete(el.value);
+      f[key] = [...list];
+      state.recordsPage = PAGE_STEP;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-filter-select]").forEach(el => {
+    el.addEventListener("change", () => {
+      activeFilters()[el.dataset.filterSelect] = el.value;
+      state.recordsPage = PAGE_STEP;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-filter-amount]").forEach(el => {
+    el.addEventListener("input", () => {
+      const cursor = el.selectionStart;
+      const digitsOnly = el.value.replace(/[^\d]/g, "");
+      activeFilters()[el.dataset.filterAmount] = digitsOnly;
+      state.recordsPage = PAGE_STEP;
+      render();
+      const next = document.querySelector(`[data-filter-amount="${el.dataset.filterAmount}"]`);
+      if (next) { next.focus(); next.setSelectionRange(cursor, cursor); }
+    });
   });
   document.querySelector("#hpTaskForm")?.addEventListener("submit", e => {
     e.preventDefault();
@@ -2260,10 +2586,13 @@ function bind() {
   });
 }
 
-function navigate(view, section) {
+// filtersOverride permet d'arriver sur Contacts avec un segment déjà appliqué
+// (voir applySegment ci-dessous) au lieu de toujours repartir de filtres vides.
+function navigate(view, section, filtersOverride) {
   state.view = view;
   state.section = section;
   state.query = "";
+  state.filters = filtersOverride || defaultFilters();
   state.drawer = null;
   state.showDetail = true;
   // Par défaut, une navigation "générale" (menu, "Voir les interactions"...)
@@ -2313,7 +2642,14 @@ function handleAction(key) {
   if (key.startsWith("quick-task:")) return openQuickForRecord(key.split(":")[1], "task");
   if (key.startsWith("add-payment:")) return openModal("payment", { type: key.split(":")[1] || "Don" });
   if (key.startsWith("add-linkage:")) return openModal("linkage", { recordId: key.split(":")[1] });
-  if (key.startsWith("apply-segment:")) { state.query = key.split(":")[1]; navigate("crm", "Contacts"); return; }
+  // "apply-legacy-segment:<étiquette encodée>" (chip des segments historiques
+  // de la page Segments) applique désormais un vrai filtre "segments" (qui ne
+  // retient que les fiches portant cette étiquette dans record.segments) au
+  // lieu de l'ancien comportement : une recherche texte libre sur le nom du
+  // segment, qui ratait toute fiche ne contenant pas littéralement ce texte.
+  if (key.startsWith("apply-legacy-segment:")) { navigate("crm", "Contacts", { ...defaultFilters(), segments: [decodeURIComponent(key.slice("apply-legacy-segment:".length))] }); return; }
+  if (key.startsWith("apply-saved-segment:")) { const seg = savedViews.find(s => s.id === key.split(":")[1]); if (seg) applySegment(seg); return; }
+  if (key.startsWith("delete-saved-segment:")) { return deleteSavedSegment(key.split(":")[1]); }
   if (key.startsWith("notify-app:")) return notify(`Nous vous préviendrons pour ${key.split(":")[1]} dès que la connexion sera disponible.`);
   if (key.startsWith("delete-category:")) return deleteInteractionCategory(Number(key.split(":")[1]));
   if (key.startsWith("edit-account:")) { const acc = accounts.find(a => a.id === key.split(":")[1]); if (acc) openModal("account", { existing: acc }); return; }
@@ -2352,10 +2688,15 @@ function handleAction(key) {
     "add-category": () => addInteractionCategory(),
     "import-new": () => openImportModal(),
     "export-current": () => downloadCsv(`export-${state.view}-${todayStr().replace(/\//g,"-")}.csv`, currentRows()),
-    "reset-filters": () => { state.query = ""; state.recordsPage = PAGE_STEP; state.paymentsPage = PAGE_STEP; render(); },
+    "reset-filters": () => { state.query = ""; state.filters = defaultFilters(); state.recordsPage = PAGE_STEP; state.paymentsPage = PAGE_STEP; render(); },
+    // Réinitialise uniquement les filtres avancés (bouton dans le tiroir
+    // "Filtres" lui-même) sans effacer la recherche texte ni fermer le tiroir.
+    "reset-filters-only": () => { state.filters = defaultFilters(); state.recordsPage = PAGE_STEP; render(); },
+    "save-segment": () => saveCurrentFiltersAsSegment(),
     "load-more-records": () => { state.recordsPage += PAGE_STEP; render(); },
     "load-more-payments": () => { state.paymentsPage += PAGE_STEP; render(); },
     "open-actions": () => { state.drawer = "actions"; render(); },
+    "open-filters": () => { state.drawer = "filters"; render(); },
     "close-drawer": () => { state.drawer = null; render(); },
     "dedupe": () => { state.drawer = "dedupe"; state.dedupeFocusId = null; state.dedupeQuery = ""; render(); },
     "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { logReceiptGeneration(p); n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
