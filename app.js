@@ -1502,10 +1502,16 @@ function hpTasksPanel() {
         <div class="hp-task-suggest" id="hpTaskSuggest" hidden></div>
       </div>
       <input type="hidden" name="recordId" id="hpTaskRecordId" value="">
-      <label class="hp-task-field"><span>Date</span><input type="date" name="dueDate" value="${todayIso()}"></label>
-      <label class="hp-task-field"><span>Heure</span><input type="time" name="dueTime" value="" title="Heure (si nécessaire)"></label>
-      <button type="button" class="hp-task-link-btn" id="hpTaskCreateContact" title="Créer un nouveau contact et le lier à cette tâche">+ Contact</button>
-      <button type="submit" class="hp-task-add" title="Ajouter">+</button>
+      <div class="hp-task-row2">
+        <div class="hp-task-datetime">
+          <label class="hp-task-field"><span>Date</span><input type="date" name="dueDate" value="${todayIso()}"></label>
+          <label class="hp-task-field"><span>Heure</span><input type="time" name="dueTime" value="" title="Heure (si nécessaire)"></label>
+        </div>
+        <div class="hp-task-actions">
+          <button type="button" class="hp-task-link-btn" id="hpTaskCreateContact" title="Créer un nouveau contact et le lier à cette tâche"><span class="hp-task-btn-icon" aria-hidden="true">+</span><span class="hp-task-btn-label">Contact</span></button>
+          <button type="submit" class="hp-task-add" title="Ajouter la tâche"><span class="hp-task-btn-icon" aria-hidden="true">+</span><span class="hp-task-btn-label">Ajouter</span></button>
+        </div>
+      </div>
       <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
     </form>
     ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
@@ -1533,9 +1539,11 @@ function hpTaskRow(t) {
     </div>
     <div class="hp-task-controls">
       ${due.label ? `<button type="button" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-action="edit-task:${t.id}" title="Modifier l'échéance">${escapeHtml(due.label)}</button>` : `<button type="button" class="hp-task-date hp-task-date-none" data-action="edit-task:${t.id}" title="Ajouter une échéance">Sans échéance</button>`}
-      ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
-      <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
-      <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+      ${t.assignedTo ? `<span class="hp-task-assignee" title="Assignée à ${escapeHtml(t.assignedTo)}"><span class="hp-task-assignee-dot" aria-hidden="true"></span>${escapeHtml(t.assignedTo)}</span>` : ""}
+      <div class="hp-task-row-icons">
+        <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
+        <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+      </div>
     </div>
   </div>`;
 }

@@ -186,6 +186,16 @@ main { min-width: 0; }
 .bottom-nav { display: none; }
 
 .content { display: grid; gap: 20px; padding: 28px 32px 56px; }
+/* Un enfant direct de .content (grid) a par défaut min-width:auto, c'est à
+   dire qu'il refuse de rétrécir sous la largeur minimale de son propre
+   contenu (un mot long, une rangée flex non compressible...), même si la
+   piste de la grille est plus étroite. Résultat : toute la page pouvait
+   déborder horizontalement sur petit écran (ex. mobile étroit) dès qu'une
+   section contenait un élément un peu large, avec un défilement latéral
+   involontaire sur l'ensemble de l'app. On force min-width:0 ici pour que
+   chaque section se limite correctement à la largeur disponible et gère
+   elle-même son propre débordement interne (ellipsis, retour à la ligne...). */
+.content > * { min-width: 0; }
 .workspace-hero {
   min-height: 0;
   display: grid;
@@ -207,7 +217,14 @@ main { min-width: 0; }
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
 }
-.panel { box-shadow: var(--shadow-card); transition: box-shadow .16s ease; }
+/* min-width: 0 : un .panel est presque toujours un enfant direct d'une grille
+   à deux colonnes (.split, .hero-grid, .records-layout, .report-grid...).
+   Par défaut, un enfant de grille refuse de rétrécir sous la largeur minimale
+   de son contenu (ex. un tableau large dans .table-wrap), même si sa piste
+   de grille est plus étroite — ce qui pouvait faire déborder toute la page
+   horizontalement sur petit écran au lieu de laisser le tableau défiler
+   proprement dans son propre cadre (.table-wrap { overflow: auto }). */
+.panel { box-shadow: var(--shadow-card); transition: box-shadow .16s ease; min-width: 0; }
 .metric-grid .metric { border: 0; border-radius: 0; box-shadow: none; position: relative; }
 .metric-grid .metric::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--accent); opacity: .85; }
 .metric { padding: 18px; }
@@ -906,36 +923,46 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-tasks { background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
 .hp-tasks .hp-activity-head { margin-bottom: 14px; }
 .hp-tasks-count { font-size: 12px; font-weight: 600; color: var(--hp-rust); background: var(--hp-rust-soft); padding: 3px 10px; border-radius: 999px; }
-.hp-task-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-.hp-task-input-wrap { position: relative; flex: 1 1 auto; min-width: 160px; }
-.hp-task-input-wrap input[type="text"] { width: 100%; border: 1px solid var(--hp-line); border-radius: 10px; padding: 9px 12px; font-size: 13.5px; background: var(--hp-bg); color: var(--hp-ink); }
+.hp-task-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.hp-task-input-wrap { position: relative; width: 100%; }
+.hp-task-input-wrap input[type="text"] { width: 100%; border: 1px solid var(--hp-line); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; background: var(--hp-bg); color: var(--hp-ink); }
 .hp-task-input-wrap input[type="text"]:focus { outline: none; border-color: var(--hp-rust); box-shadow: 0 0 0 3px var(--hp-rust-soft); }
 .hp-task-suggest { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--hp-surface); border: 1px solid var(--hp-line); border-radius: 10px; box-shadow: 0 10px 24px rgba(42, 35, 29, .14); z-index: 6; max-height: 220px; overflow-y: auto; padding: 4px; }
 .hp-task-suggest-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; border: none; background: transparent; padding: 8px 10px; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--hp-ink); cursor: pointer; }
 .hp-task-suggest-item:hover { background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
 .hp-task-suggest-kind { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--hp-muted); flex: none; }
-.hp-task-linked { display: none; align-items: center; gap: 6px; flex-basis: 100%; margin-top: -4px; font-size: 12px; color: var(--hp-muted); }
+.hp-task-linked { display: none; align-items: center; gap: 6px; margin-top: -2px; font-size: 12px; color: var(--hp-muted); }
 .hp-task-linked:not([hidden]) { display: flex; }
 .hp-task-linked strong { color: var(--hp-rust-deep); font-weight: 700; }
 .hp-task-linked button { border: none; background: transparent; color: var(--hp-muted); cursor: pointer; font-size: 12px; padding: 2px; }
 .hp-task-linked button:hover { color: var(--hp-rust-deep); }
-.hp-task-form input[type="date"], .hp-task-form input[type="time"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); flex: none; min-height: 0; min-width: 0; text-transform: none; letter-spacing: normal; font-weight: 400; }
+/* Deuxième rangée du formulaire : date+heure d'un côté, actions (lier un
+   contact / ajouter) de l'autre. Sur desktop les deux groupes se partagent
+   la largeur ; sur mobile (règle plus bas) ils passent chacun en pleine
+   largeur, l'un sous l'autre, pour ne jamais se comprimer. */
+.hp-task-row2 { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.hp-task-datetime { display: flex; gap: 8px; flex: 1 1 220px; min-width: 0; }
+.hp-task-form input[type="date"], .hp-task-form input[type="time"] { width: 100%; border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-ink); flex: none; min-height: 0; min-width: 0; text-transform: none; letter-spacing: normal; font-weight: 400; }
 /* Un <input type="time"> vide n'affiche aucun indice visuel (le "placeholder"
    n'est pas pris en charge sur ce type de champ) : sans libellé, il
    ressemblait à un simple encadré vide/cassé. On enveloppe donc date et
    heure dans un petit libellé ("Date"/"Heure") au lieu de les laisser nus
    dans la rangée. */
-.hp-task-field { display: flex; flex-direction: column; gap: 3px; flex: none; color: var(--hp-muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.hp-task-link-btn { flex: none; border: 1px dashed var(--hp-rust); border-radius: 10px; background: var(--hp-surface); color: var(--hp-rust); font-size: 11.5px; font-weight: 700; padding: 8px 10px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.hp-task-field { display: flex; flex-direction: column; gap: 3px; flex: 1 1 0; min-width: 0; color: var(--hp-muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.hp-task-actions { display: flex; gap: 8px; flex: none; }
+.hp-task-btn-icon { font-size: 14px; line-height: 1; font-weight: 600; }
+.hp-task-link-btn, .hp-task-add { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 38px; border-radius: 10px; font-size: 12.5px; font-weight: 700; padding: 0 14px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.hp-task-link-btn { border: 1.5px solid var(--hp-rust); background: var(--hp-surface); color: var(--hp-rust); }
 .hp-task-link-btn:hover { background: var(--hp-rust-soft); }
-.hp-task-add { width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--hp-rust); color: #fff9f2; font-size: 19px; line-height: 1; cursor: pointer; display: grid; place-items: center; transition: background .15s ease; }
+.hp-task-add { border: none; background: var(--hp-rust); color: #fff9f2; }
+.hp-task-add .hp-task-btn-icon { font-size: 16px; }
 .hp-task-add:hover { background: var(--hp-rust-deep); }
 .hp-task-list { display: flex; flex-direction: column; }
-.hp-task-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; row-gap: 6px; padding: 10px 2px; border-bottom: 1px solid var(--hp-line); }
+.hp-task-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; row-gap: 8px; padding: 12px 2px; border-bottom: 1px solid var(--hp-line); }
 .hp-task-row:last-child { border-bottom: none; }
 .hp-task-checkbox { width: 17px; height: 17px; accent-color: var(--hp-rust); flex: none; cursor: pointer; }
 .hp-task-main { flex: 1 1 auto; min-width: 60px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.hp-task-controls { display: flex; align-items: center; gap: 10px; flex: none; }
+.hp-task-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: none; }
 .hp-task-title { min-width: 40px; font-size: 13.5px; color: var(--hp-ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hp-task-contact-chip { flex: none; border: none; background: var(--hp-rust-soft); color: var(--hp-rust-deep); font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer; }
 .hp-task-contact-chip:hover { background: var(--hp-rust); color: #fff9f2; }
@@ -951,7 +978,12 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-task-date-late { border-color: #e2a190; background: #fbe4de; color: #a13a1f; }
 .hp-task-date-today { border-color: var(--hp-rust); background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
 .hp-task-date-soon { border-color: #c9d2bd; background: #eef0e8; color: #566047; }
-.hp-task-assignee { font-size: 11px; color: var(--hp-muted); flex: none; }
+/* Pastille "assigné à" : même langage visuel (pilule compacte) que la pastille
+   date juste à côté, plutôt qu'un simple texte gris flottant sans cadre,
+   pour que les deux informations se lisent comme un même groupe cohérent. */
+.hp-task-assignee { display: inline-flex; align-items: center; gap: 5px; flex: none; font-size: 10.5px; font-weight: 600; color: var(--hp-muted); background: var(--hp-bg); border: 1px solid var(--hp-line); padding: 4px 10px 4px 8px; border-radius: 999px; white-space: nowrap; }
+.hp-task-assignee-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hp-rust); flex: none; }
+.hp-task-row-icons { display: flex; align-items: center; gap: 2px; flex: none; }
 .hp-task-edit, .hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
 .hp-task-row:hover .hp-task-edit, .hp-task-row:hover .hp-task-remove { opacity: 1; }
 .hp-task-edit:hover { color: var(--hp-rust-deep); background: var(--hp-rust-soft); }
@@ -1045,11 +1077,19 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .hp-stat:nth-child(2n+1) { border-left: none; }
   .hp-columns { grid-template-columns: 1fr; }
   .hp-tasks { padding: 16px; }
-  .hp-task-input-wrap { flex-basis: 100%; }
-  .hp-task-link-btn { font-size: 10.5px; padding: 6px 8px; }
-  .hp-task-assignee { display: none; }
+  /* Formulaire d'ajout : sur desktop, date/heure et boutons d'action se
+     partagent une même rangée ; sur mobile il n'y a plus la place, donc
+     chaque groupe passe en pleine largeur, l'un sous l'autre. Les deux
+     boutons ("+ Contact" / "Ajouter") se partagent alors la largeur à
+     parts égales — de vrais boutons tactiles, plus les petites icônes
+     écrasées d'avant. */
+  .hp-task-row2 { flex-direction: column; align-items: stretch; }
+  .hp-task-datetime { flex-basis: 100%; }
+  .hp-task-actions { flex-basis: 100%; }
+  .hp-task-link-btn, .hp-task-add { flex: 1 1 0; }
   .hp-task-date { font-size: 10.5px; padding: 4px 8px; }
   .hp-task-contact-chip { font-size: 10px; }
+  .hp-task-assignee { font-size: 10px; padding: 3px 8px 3px 7px; }
   /* Sur tactile il n'y a pas de survol : les boutons modifier/supprimer
      restaient invisibles en permanence (opacity 0 tant qu'on ne survole pas
      la ligne), donc impossible d'y toucher au doigt. On les affiche toujours
