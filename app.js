@@ -1458,9 +1458,10 @@ function togglePortfolio(id) {
 function taskDueInfo(t) {
   if (!t.dueDate) return { tone: "none", label: "" };
   const today = todayIso();
-  if (t.dueDate < today) return { tone: "late", label: `En retard — ${formatFrDate(t.dueDate)}` };
-  if (t.dueDate === today) return { tone: "today", label: "Aujourd'hui" };
-  return { tone: "soon", label: formatFrDate(t.dueDate) };
+  const timeSuffix = t.dueTime ? ` · ${t.dueTime}` : "";
+  if (t.dueDate < today) return { tone: "late", label: `En retard — ${formatFrDate(t.dueDate)}${timeSuffix}` };
+  if (t.dueDate === today) return { tone: "today", label: `Aujourd'hui${timeSuffix}` };
+  return { tone: "soon", label: `${formatFrDate(t.dueDate)}${timeSuffix}` };
 }
 function formatFrDate(iso) {
   if (!iso) return "";
@@ -1501,8 +1502,8 @@ function hpTasksPanel() {
         <div class="hp-task-suggest" id="hpTaskSuggest" hidden></div>
       </div>
       <input type="hidden" name="recordId" id="hpTaskRecordId" value="">
-      <input type="date" name="dueDate" value="${todayIso()}">
-      <input type="time" name="dueTime" value="" title="Heure (si nécessaire)">
+      <label class="hp-task-field"><span>Date</span><input type="date" name="dueDate" value="${todayIso()}"></label>
+      <label class="hp-task-field"><span>Heure</span><input type="time" name="dueTime" value="" title="Heure (si nécessaire)"></label>
       <button type="button" class="hp-task-link-btn" id="hpTaskCreateContact" title="Créer un nouveau contact et le lier à cette tâche">+ Contact</button>
       <button type="submit" class="hp-task-add" title="Ajouter">+</button>
       <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
@@ -1531,8 +1532,7 @@ function hpTaskRow(t) {
       ${t.holidayKey ? `<button type="button" class="hp-task-contact-chip" data-action="holiday-prepare:${t.holidayKey}" title="Ouvrir la case idée">💡 Idée</button>` : ""}
     </div>
     <div class="hp-task-controls">
-      <input type="date" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-task="${t.id}" value="${t.dueDate || ""}" title="${due.label ? escapeHtml(due.label) : "Ajouter une échéance"}">
-      ${t.dueTime ? `<span class="hp-task-time-chip">${escapeHtml(t.dueTime)}</span>` : ""}
+      ${due.label ? `<button type="button" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-action="edit-task:${t.id}" title="Modifier l'échéance">${escapeHtml(due.label)}</button>` : `<button type="button" class="hp-task-date hp-task-date-none" data-action="edit-task:${t.id}" title="Ajouter une échéance">Sans échéance</button>`}
       ${t.assignedTo ? `<span class="hp-task-assignee">${escapeHtml(t.assignedTo)}</span>` : ""}
       <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
       <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
@@ -1664,65 +1664,146 @@ function deleteHomeTask(id) {
   render();
 }
 
-// ---- Notifications de tâches sur cet appareil -----------------------------
-// Rappel local (API Notification du navigateur), avec une heure choisie par
-// la personne connectée. Réglage volontairement gardé par appareil (comme
-// l'autorisation de notification elle-même) : stocké en localStorage, pas
-// synchronisé dans /api/state. Ça fonctionne tant que le CRM a été ouvert
-// dans ce navigateur récemment (l'onglet ou l'app installée) ; ce n'est pas
-// une vraie notification "push" reçue même app totalement fermée — surtout
-// pas garanti sur iPhone/Safari, où c'est une vraie limite technique.
-const NOTIF_PREFS_KEY = "sinai-crm-notif-prefs-v1";
-function loadNotifPrefs() {
+// ---- Notifications push réelles (reçues même app fermée) -----------------
+// Remplace l'ancien rappel purement local au navigateur (API Notification +
+// setInterval, qui ne fonctionnait que tant que l'onglet avait été ouvert
+// récemment) par un vrai abonnement Web Push : c'est le serveur qui envoie
+// la notification, et le Service Worker (voir service-worker.js, handler
+// "push") qui peut l'afficher même si l'app est totalement fermée. Réglage
+// et abonnement gardés par appareil (comme l'autorisation de notification
+// elle-même), mais synchronisés avec le serveur via /api/push/*.
+// Limite propre à iOS : Apple exige que l'app ait été ajoutée à l'écran
+// d'accueil pour que les notifications push fonctionnent du tout sur
+// iPhone/iPad — ce n'est pas une limite de ce CRM.
+let pushState = {
+  supported: ("serviceWorker" in navigator) && ("PushManager" in window),
+  permission: (typeof Notification !== "undefined" ? Notification.permission : "unsupported"),
+  subscribed: false,
+  enabled: false,
+  time: "09:00",
+};
+
+function isIosDevice() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent || "");
+}
+function isStandaloneDisplay() {
+  return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
+}
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = window.atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+async function apiGetVapidPublicKey() {
+  const res = await fetch(`${API_BASE}/api/push/vapid-public-key`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Impossible de récupérer la clé VAPID");
+  return res.json();
+}
+async function apiGetPushPrefs() {
+  const res = await fetch(`${API_BASE}/api/push/prefs`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Impossible de récupérer les préférences de notification");
+  return res.json();
+}
+async function apiSetPushPrefs(enabled, time) {
+  const res = await fetch(`${API_BASE}/api/push/prefs`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ enabled, time }),
+  });
+  if (!res.ok) throw new Error("Impossible d'enregistrer les préférences de notification");
+  return res.json();
+}
+async function apiPushSubscribe(subscriptionJson) {
+  const res = await fetch(`${API_BASE}/api/push/subscribe`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(subscriptionJson),
+  });
+  if (!res.ok) throw new Error("Impossible d'enregistrer l'abonnement push");
+  return res.json();
+}
+async function apiPushUnsubscribe(endpoint) {
   try {
-    if (!window.localStorage) return { enabled: false, time: "09:00", lastFired: "" };
-    const raw = window.localStorage.getItem(NOTIF_PREFS_KEY);
-    if (!raw) return { enabled: false, time: "09:00", lastFired: "" };
-    const data = JSON.parse(raw);
-    return { enabled: !!data.enabled, time: data.time || "09:00", lastFired: data.lastFired || "" };
+    const res = await fetch(`${API_BASE}/api/push/unsubscribe`, {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ endpoint }),
+    });
+    return res.ok;
   } catch {
-    return { enabled: false, time: "09:00", lastFired: "" };
+    return false;
   }
 }
-function saveNotifPrefs() {
+
+async function refreshPushState() {
+  if (!pushState.supported) return;
   try {
-    if (window.localStorage) window.localStorage.setItem(NOTIF_PREFS_KEY, JSON.stringify(notifPrefs));
-  } catch { /* stockage indisponible : tant pis, le réglage ne persistera pas */ }
+    const [prefs, reg] = await Promise.all([
+      apiGetPushPrefs().catch(() => ({ enabled: false, time: "09:00" })),
+      navigator.serviceWorker.ready,
+    ]);
+    const sub = await reg.pushManager.getSubscription();
+    pushState.enabled = !!prefs.enabled;
+    pushState.time = prefs.time || "09:00";
+    pushState.subscribed = !!sub;
+    pushState.permission = typeof Notification !== "undefined" ? Notification.permission : "unsupported";
+  } catch { /* réseau indisponible pour l'instant : on garde les valeurs précédentes */ }
 }
-let notifPrefs = loadNotifPrefs();
-function tasksDueForNotification() {
-  const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
-  return tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate <= todayIso() && (!me || !t.assignedTo || t.assignedTo === me));
-}
-function maybeFireTaskNotification() {
-  if (!notifPrefs.enabled) return;
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  const today = todayIso();
-  if (notifPrefs.lastFired === today) return;
-  const now = new Date();
-  const nowHm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  if (nowHm < (notifPrefs.time || "09:00")) return;
-  const due = tasksDueForNotification();
-  if (due.length) {
-    try {
-      const title = due.length === 1 ? "1 tâche à traiter" : `${due.length} tâches à traiter`;
-      const body = due.slice(0, 5).map(t => `• ${t.title}${t.dueTime ? ` (${t.dueTime})` : ""}`).join("\n") + (due.length > 5 ? `\n… et ${due.length - 5} autre(s)` : "");
-      new Notification(title, { body, icon: "./assets/icon-192.png" });
-    } catch { /* notification indisponible sur cet appareil */ }
+
+async function enablePushNotifications(time) {
+  if (typeof Notification === "undefined") { notify("Notifications non prises en charge par ce navigateur"); return false; }
+  let perm = Notification.permission;
+  if (perm === "default") { try { perm = await Notification.requestPermission(); } catch { perm = "denied"; } }
+  pushState.permission = perm;
+  if (perm !== "granted") { notify("Autorisation refusée dans le navigateur"); return false; }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      const { publicKey, available } = await apiGetVapidPublicKey();
+      if (!available || !publicKey) { notify("Notifications push indisponibles sur ce serveur pour le moment"); return false; }
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+    }
+    await apiPushSubscribe(sub.toJSON());
+    await apiSetPushPrefs(true, time || pushState.time);
+    pushState.subscribed = true;
+    pushState.enabled = true;
+    pushState.time = time || pushState.time;
+    return true;
+  } catch (err) {
+    notify(`Impossible d'activer les notifications push : ${err?.message || err}`);
+    return false;
   }
-  notifPrefs.lastFired = today;
-  saveNotifPrefs();
 }
+
+async function disablePushNotifications() {
+  try { await apiSetPushPrefs(false, pushState.time); } catch { /* on continue quand meme cote appareil */ }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await apiPushUnsubscribe(sub.endpoint);
+      await sub.unsubscribe().catch(() => {});
+    }
+  } catch { /* pas grave : le serveur n'enverra plus rien tant que enabled=false */ }
+  pushState.enabled = false;
+  pushState.subscribed = false;
+}
+
 function notifSettingsPanel() {
-  const supported = typeof Notification !== "undefined";
-  const permission = supported ? Notification.permission : "unsupported";
+  if (!pushState.supported) {
+    return `<section class="panel pad" id="notifSettingsPanel">
+      <span class="eyebrow">Rappels</span><h2>Notifications de tâches</h2>
+      <p class="muted-note">Ce navigateur ne prend pas en charge les notifications push.</p>
+    </section>`;
+  }
+  const ios = isIosDevice();
+  const standalone = isStandaloneDisplay();
   return `<section class="panel pad" id="notifSettingsPanel">
     <span class="eyebrow">Rappels</span><h2>Notifications de tâches</h2>
-    <p class="muted-note">Reçois une notification sur cet appareil pour tes tâches du jour et en retard, à l'heure choisie ci-dessous. Ça fonctionne tant que le CRM a été ouvert récemment dans ce navigateur (ou l'app installée) sur ce téléphone/ordinateur — ce n'est pas garanti si l'app reste fermée longtemps, notamment sur iPhone.</p>
-    ${!supported ? `<p class="muted-note">Ce navigateur ne prend pas en charge les notifications.</p>` : ""}
-    ${supported && permission === "denied" ? `<p class="muted-note">Les notifications sont bloquées pour ce site dans les réglages du navigateur. Autorise-les pour recevoir les rappels.</p>` : ""}
-    <label class="settings-toggle-row"><input type="checkbox" id="notifEnabledToggle" ${supported ? "" : "disabled"} ${notifPrefs.enabled ? "checked" : ""}><span>Activer les notifications de tâches sur cet appareil</span></label>
-    <div class="form-grid"><label>Heure du rappel<input type="time" id="notifTimeInput" value="${escapeHtml(notifPrefs.time)}" ${supported ? "" : "disabled"}></label></div>
+    <p class="muted-note">Reçois une vraie notification sur ton téléphone ou ordinateur pour tes tâches du jour et en retard, à l'heure choisie ci-dessous — même quand l'app est fermée.</p>
+    ${ios && !standalone ? `<p class="muted-note"><strong>Sur iPhone/iPad :</strong> ajoute d'abord ce CRM à l'écran d'accueil (bouton Partager puis "Sur l'écran d'accueil") — c'est une exigence d'Apple, sans ça les notifications ne fonctionnent pas du tout sur iOS.</p>` : ""}
+    ${pushState.permission === "denied" ? `<p class="muted-note">Les notifications sont bloquées pour ce site dans les réglages du navigateur. Autorise-les pour recevoir les rappels.</p>` : ""}
+    <label class="settings-toggle-row"><input type="checkbox" id="notifEnabledToggle" ${pushState.enabled ? "checked" : ""}><span>Activer les notifications de tâches sur cet appareil</span></label>
+    <div class="form-grid"><label>Heure du rappel<input type="time" id="notifTimeInput" value="${escapeHtml(pushState.time)}"></label></div>
   </section>`;
 }
 
@@ -2550,21 +2631,22 @@ function bind() {
   });
   document.querySelector("#notifEnabledToggle")?.addEventListener("change", async (e) => {
     const el = e.target;
+    el.disabled = true;
     if (el.checked) {
-      if (typeof Notification === "undefined") { notify("Notifications non prises en charge par ce navigateur"); el.checked = false; return; }
-      let perm = Notification.permission;
-      if (perm === "default") { try { perm = await Notification.requestPermission(); } catch { perm = "denied"; } }
-      if (perm !== "granted") { notify("Autorisation refusée dans le navigateur"); el.checked = false; render(); return; }
+      const ok = await enablePushNotifications(pushState.time);
+      if (!ok) { render(); return; }
+      notify("Rappels activés sur cet appareil");
+    } else {
+      await disablePushNotifications();
+      notify("Rappels désactivés sur cet appareil");
     }
-    notifPrefs.enabled = el.checked;
-    if (el.checked) notifPrefs.lastFired = "";
-    saveNotifPrefs();
-    notify(notifPrefs.enabled ? "Rappels activés sur cet appareil" : "Rappels désactivés sur cet appareil");
+    render();
   });
-  document.querySelector("#notifTimeInput")?.addEventListener("change", (e) => {
-    notifPrefs.time = e.target.value || "09:00";
-    notifPrefs.lastFired = "";
-    saveNotifPrefs();
+  document.querySelector("#notifTimeInput")?.addEventListener("change", async (e) => {
+    pushState.time = e.target.value || "09:00";
+    if (pushState.enabled) {
+      try { await apiSetPushPrefs(true, pushState.time); } catch { /* reseau indisponible : reessaiera au prochain changement */ }
+    }
   });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
@@ -3680,11 +3762,11 @@ async function bootApp() {
   state.booted = true;
   render();
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
-  // Rappels de tâches sur cet appareil : on vérifie tout de suite puis
-  // toutes les minutes si l'heure choisie est atteinte (voir Réglages).
-  maybeFireTaskNotification();
-  clearInterval(bootApp._notifTimer);
-  bootApp._notifTimer = setInterval(maybeFireTaskNotification, 60000);
+  // Rappels de tâches : vraies notifications push envoyées par le serveur
+  // (voir Réglages) — on resynchronise juste l'état d'abonnement de cet
+  // appareil (abonné ou non, heure choisie) pour que le panneau Réglages
+  // reflète la réalité, y compris après une connexion sur un nouvel appareil.
+  refreshPushState().then(() => render());
 }
 
 document.querySelector("#newRecordBtn").addEventListener("click", toggleFabMenu);

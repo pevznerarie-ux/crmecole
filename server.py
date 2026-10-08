@@ -2,15 +2,35 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+import base64
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
+import threading
+import time
 import uuid
 
 from fpdf import FPDF
 from num2words import num2words
+
+# Notifications push réelles (reçues même app fermée, contrairement à l'ancien
+# rappel purement local au navigateur) : py_vapid + pywebpush. Optionnel et
+# protégé par un try/except — si l'installation venait à manquer sur un
+# environnement, le reste du CRM continue de fonctionner normalement, seules
+# les notifications push sont simplement désactivées (voir PUSH_AVAILABLE).
+try:
+    from py_vapid import Vapid01
+    from pywebpush import WebPushException, webpush
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    PUSH_AVAILABLE = True
+except Exception:
+    PUSH_AVAILABLE = False
+
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
 ROOT = Path(__file__).resolve().parent
@@ -100,6 +120,224 @@ def init_auth_tables(db):
         )
         """
     )
+
+
+def b64url(raw_bytes):
+    return base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode()
+
+
+# ---------- Notifications push (Web Push / VAPID) -------------------------
+# Tables dédiées, séparées de COLLECTIONS pour la même raison que
+# accounts/sessions : ça ne doit jamais transiter par /api/state.
+def init_push_tables(db):
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            endpoint TEXT NOT NULL UNIQUE,
+            p256dh TEXT NOT NULL,
+            auth TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_account ON push_subscriptions(account_id)"
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notif_prefs (
+            account_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            reminder_time TEXT NOT NULL DEFAULT '09:00',
+            last_fired_date TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def get_or_create_vapid_keys(db):
+    """Génère la paire de clés VAPID une seule fois au tout premier démarrage
+    et la stocke dans la table meta (jamais dans /api/state). Évite de devoir
+    configurer une variable d'environnement Railway supplémentaire : tout se
+    fait automatiquement côté serveur."""
+    priv = get_meta(db, "vapidPrivateKey")
+    pub = get_meta(db, "vapidPublicKey")
+    if priv and pub:
+        return priv, pub
+    if not PUSH_AVAILABLE:
+        return None, None
+    vapid = Vapid01()
+    vapid.generate_keys()
+    priv_value = vapid.private_key.private_numbers().private_value
+    priv = b64url(priv_value.to_bytes(32, "big"))
+    pub_bytes = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    pub = b64url(pub_bytes)
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("vapidPrivateKey", priv))
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("vapidPublicKey", pub))
+    return priv, pub
+
+
+def save_push_subscription(account_id, endpoint, p256dh, auth_secret):
+    now = now_iso()
+    with connect() as db:
+        existing = db.execute("SELECT id FROM push_subscriptions WHERE endpoint = ?", (endpoint,)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE push_subscriptions SET account_id = ?, p256dh = ?, auth = ?, last_seen = ? WHERE endpoint = ?",
+                (account_id, p256dh, auth_secret, now, endpoint),
+            )
+        else:
+            db.execute(
+                """
+                INSERT INTO push_subscriptions(id, account_id, endpoint, p256dh, auth, created_at, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (f"PUSH-{uuid.uuid4().hex[:10]}", account_id, endpoint, p256dh, auth_secret, now, now),
+            )
+
+
+def remove_push_subscription(account_id, endpoint):
+    with connect() as db:
+        db.execute("DELETE FROM push_subscriptions WHERE account_id = ? AND endpoint = ?", (account_id, endpoint))
+
+
+def get_notif_prefs_row(account_id):
+    with connect() as db:
+        row = db.execute("SELECT * FROM notif_prefs WHERE account_id = ?", (account_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def public_notif_prefs(account_id):
+    row = get_notif_prefs_row(account_id)
+    if not row:
+        return {"enabled": False, "time": "09:00"}
+    return {"enabled": bool(row["enabled"]), "time": row.get("reminder_time") or "09:00"}
+
+
+def set_notif_prefs(account_id, enabled, reminder_time):
+    now = now_iso()
+    with connect() as db:
+        existing = db.execute("SELECT account_id FROM notif_prefs WHERE account_id = ?", (account_id,)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE notif_prefs SET enabled = ?, reminder_time = ?, updated_at = ? WHERE account_id = ?",
+                (1 if enabled else 0, reminder_time, now, account_id),
+            )
+        else:
+            db.execute(
+                """
+                INSERT INTO notif_prefs(account_id, enabled, reminder_time, last_fired_date, updated_at)
+                VALUES (?, ?, ?, NULL, ?)
+                """,
+                (account_id, 1 if enabled else 0, reminder_time, now),
+            )
+
+
+def send_push_to_account(account_id, title, body):
+    """Envoie une notification push à tous les abonnements connus de ce
+    compte. Supprime automatiquement un abonnement que le navigateur a
+    révoqué (410 Gone / 404 Not Found, ex. app désinstallée) pour ne pas
+    réessayer indéfiniment dessus."""
+    if not PUSH_AVAILABLE:
+        return
+    with connect() as db:
+        priv, _ = get_or_create_vapid_keys(db)
+        subs = db.execute("SELECT * FROM push_subscriptions WHERE account_id = ?", (account_id,)).fetchall()
+    if not priv or not subs:
+        return
+    payload = json.dumps({"title": title, "body": body}, ensure_ascii=False)
+    for sub in subs:
+        subscription_info = {
+            "endpoint": sub["endpoint"],
+            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+        }
+        try:
+            webpush(
+                subscription_info=subscription_info,
+                data=payload,
+                vapid_private_key=priv,
+                vapid_claims={"sub": "mailto:contact@sinai-ecole.org"},
+                ttl=3600,
+                timeout=10,
+            )
+        except WebPushException as exc:
+            if exc.status_code in (404, 410):
+                with connect() as db:
+                    db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+            else:
+                print(f"[push] Echec envoi (compte {account_id}) : {exc}")
+        except Exception as exc:
+            print(f"[push] Erreur inattendue envoi push (compte {account_id}) : {exc}")
+
+
+def push_notification_tick():
+    """Un passage de la boucle de fond : pour chaque compte ayant activé les
+    rappels, si l'heure choisie (Europe/Paris) est atteinte et que le rappel
+    du jour n'est pas déjà parti, cherche les tâches dues aujourd'hui/en
+    retard assignées à ce compte et envoie une vraie notification push —
+    fonctionne même si l'app est complètement fermée, contrairement à
+    l'ancien rappel local au navigateur (API Notification + setInterval)."""
+    if not PUSH_AVAILABLE:
+        return
+    now_paris = datetime.now(PARIS_TZ)
+    today = now_paris.date().isoformat()
+    now_hm = now_paris.strftime("%H:%M")
+    with connect() as db:
+        prefs_rows = db.execute("SELECT * FROM notif_prefs WHERE enabled = 1").fetchall()
+        if not prefs_rows:
+            return
+        accounts_by_id = {row["id"]: row for row in db.execute("SELECT * FROM accounts").fetchall()}
+        task_rows = db.execute("SELECT payload FROM collection_items WHERE collection = 'tasks'").fetchall()
+    tasks = []
+    for row in task_rows:
+        try:
+            tasks.append(json.loads(row["payload"]))
+        except Exception:
+            continue
+    for pref in prefs_rows:
+        account_id = pref["account_id"]
+        if pref["last_fired_date"] == today:
+            continue
+        reminder_time = pref["reminder_time"] or "09:00"
+        if now_hm < reminder_time:
+            continue
+        account = accounts_by_id.get(account_id)
+        if not account:
+            continue
+        me = (account["first"] or (account["email"] or "").split("@")[0] or "").strip()
+        due = [
+            t for t in tasks
+            if t.get("status") != "fait" and t.get("dueDate") and t.get("dueDate") <= today
+            and (not me or not t.get("assignedTo") or t.get("assignedTo") == me)
+        ]
+        with connect() as db:
+            db.execute(
+                "UPDATE notif_prefs SET last_fired_date = ? WHERE account_id = ?",
+                (today, account_id),
+            )
+        if not due:
+            continue
+        title = "1 tâche à traiter" if len(due) == 1 else f"{len(due)} tâches à traiter"
+        body = "\n".join(
+            f"• {t.get('title', '')}" + (f" ({t['dueTime']})" if t.get("dueTime") else "")
+            for t in due[:5]
+        )
+        if len(due) > 5:
+            body += f"\n… et {len(due) - 5} autre(s)"
+        send_push_to_account(account_id, title, body)
+
+
+def push_notification_loop():
+    while True:
+        try:
+            push_notification_tick()
+        except Exception as exc:
+            print(f"[push] Erreur boucle de notifications : {exc}")
+        time.sleep(60)
 
 
 def accounts_count():
@@ -282,6 +520,8 @@ def init_db():
             """
         )
         init_auth_tables(db)
+        init_push_tables(db)
+        get_or_create_vapid_keys(db)
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS collection_items (
@@ -857,6 +1097,14 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         if path == "/api/collections":
             self.send_json({"collections": sorted(COLLECTIONS), "counts": api_counts()})
             return
+        if path == "/api/push/vapid-public-key":
+            with connect() as db:
+                _, pub = get_or_create_vapid_keys(db)
+            self.send_json({"publicKey": pub, "available": PUSH_AVAILABLE})
+            return
+        if path == "/api/push/prefs":
+            self.send_json(public_notif_prefs(account["id"]))
+            return
         route = self.collection_route(path)
         if route:
             collection, item_id = route
@@ -940,6 +1188,35 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         # Tout le reste de l'API nécessite une session valide.
         account = self.require_account()
         if not account:
+            return
+
+        if path == "/api/push/subscribe":
+            data = self.read_json()
+            endpoint = (data.get("endpoint") or "").strip()
+            keys = data.get("keys") or {}
+            p256dh = (keys.get("p256dh") or "").strip()
+            auth_secret = (keys.get("auth") or "").strip()
+            if not endpoint or not p256dh or not auth_secret:
+                self.send_error_json(400, "Abonnement push incomplet")
+                return
+            save_push_subscription(account["id"], endpoint, p256dh, auth_secret)
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/push/unsubscribe":
+            data = self.read_json()
+            endpoint = (data.get("endpoint") or "").strip()
+            if endpoint:
+                remove_push_subscription(account["id"], endpoint)
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/push/prefs":
+            data = self.read_json()
+            enabled = bool(data.get("enabled"))
+            reminder_time = data.get("time") or "09:00"
+            set_notif_prefs(account["id"], enabled, reminder_time)
+            self.send_json(public_notif_prefs(account["id"]))
             return
 
         if path == "/api/receipt-pdf":
@@ -1133,4 +1410,9 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer((host, port), SinaiCrmHandler)
     print(f"CRM Sinai backend running at http://{host}:{port}/index.html")
     print(f"SQLite database: {DB_FILE}")
+    if PUSH_AVAILABLE:
+        threading.Thread(target=push_notification_loop, daemon=True).start()
+        print("[push] Notifications push activées (boucle de fond démarrée)")
+    else:
+        print("[push] pywebpush indisponible : notifications push désactivées, reste du CRM inchangé")
     server.serve_forever()

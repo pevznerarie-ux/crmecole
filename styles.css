@@ -919,7 +919,13 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-task-linked strong { color: var(--hp-rust-deep); font-weight: 700; }
 .hp-task-linked button { border: none; background: transparent; color: var(--hp-muted); cursor: pointer; font-size: 12px; padding: 2px; }
 .hp-task-linked button:hover { color: var(--hp-rust-deep); }
-.hp-task-form input[type="date"], .hp-task-form input[type="time"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); flex: none; }
+.hp-task-form input[type="date"], .hp-task-form input[type="time"] { border: 1px solid var(--hp-line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--hp-bg); color: var(--hp-muted); flex: none; min-height: 0; min-width: 0; text-transform: none; letter-spacing: normal; font-weight: 400; }
+/* Un <input type="time"> vide n'affiche aucun indice visuel (le "placeholder"
+   n'est pas pris en charge sur ce type de champ) : sans libellé, il
+   ressemblait à un simple encadré vide/cassé. On enveloppe donc date et
+   heure dans un petit libellé ("Date"/"Heure") au lieu de les laisser nus
+   dans la rangée. */
+.hp-task-field { display: flex; flex-direction: column; gap: 3px; flex: none; color: var(--hp-muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .hp-task-link-btn { flex: none; border: 1px dashed var(--hp-rust); border-radius: 10px; background: var(--hp-surface); color: var(--hp-rust); font-size: 11.5px; font-weight: 700; padding: 8px 10px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
 .hp-task-link-btn:hover { background: var(--hp-rust-soft); }
 .hp-task-add { width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--hp-rust); color: #fff9f2; font-size: 19px; line-height: 1; cursor: pointer; display: grid; place-items: center; transition: background .15s ease; }
@@ -933,12 +939,18 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
 .hp-task-title { min-width: 40px; font-size: 13.5px; color: var(--hp-ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hp-task-contact-chip { flex: none; border: none; background: var(--hp-rust-soft); color: var(--hp-rust-deep); font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer; }
 .hp-task-contact-chip:hover { background: var(--hp-rust); color: #fff9f2; }
-.hp-task-date { flex: none; width: 118px; border: 1px solid var(--hp-line); border-radius: 8px; padding: 4px 6px; font-size: 11.5px; background: var(--hp-bg); color: var(--hp-muted); }
-.hp-task-date:focus { outline: none; border-color: var(--hp-rust); }
+/* .hp-task-date est désormais un <button> (badge compact date+heure, ex.
+   "Aujourd'hui · 14:30") qui ouvre la modale "Modifier la tâche" au clic,
+   plutôt qu'un <input type="date"> édité en ligne : sur mobile, un input
+   date natif y affiche le format verbeux du système ("Oct 8, 2026" sur
+   iOS, non raccourcissable par CSS) et devait en plus passer à 16px pour
+   éviter le zoom auto de Safari — d'où des pastilles disproportionnées.
+   Un badge texte, lui, reste compact et cohérent sur tous les écrans. */
+.hp-task-date { flex: none; min-height: 0; width: auto; max-width: 100%; border: 1px solid var(--hp-line); border-radius: 999px; padding: 4px 10px; font-size: 11px; font-weight: 600; background: var(--hp-bg); color: var(--hp-muted); white-space: nowrap; cursor: pointer; font-variant-numeric: tabular-nums; transition: filter .12s ease; }
+.hp-task-date:hover, .hp-task-date:focus-visible { outline: none; filter: brightness(0.96); }
 .hp-task-date-late { border-color: #e2a190; background: #fbe4de; color: #a13a1f; }
 .hp-task-date-today { border-color: var(--hp-rust); background: var(--hp-rust-soft); color: var(--hp-rust-deep); }
 .hp-task-date-soon { border-color: #c9d2bd; background: #eef0e8; color: #566047; }
-.hp-task-time-chip { flex: none; font-size: 11px; color: var(--hp-muted); background: var(--hp-rust-soft); padding: 3px 7px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 .hp-task-assignee { font-size: 11px; color: var(--hp-muted); flex: none; }
 .hp-task-edit, .hp-task-remove { border: none; background: transparent; color: var(--hp-muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
 .hp-task-row:hover .hp-task-edit, .hp-task-row:hover .hp-task-remove { opacity: 1; }
@@ -1036,7 +1048,7 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   .hp-task-input-wrap { flex-basis: 100%; }
   .hp-task-link-btn { font-size: 10.5px; padding: 6px 8px; }
   .hp-task-assignee { display: none; }
-  .hp-task-date { width: 100px; font-size: 10.5px; padding: 4px; }
+  .hp-task-date { font-size: 10.5px; padding: 4px 8px; }
   .hp-task-contact-chip { font-size: 10px; }
   /* Sur tactile il n'y a pas de survol : les boutons modifier/supprimer
      restaient invisibles en permanence (opacity 0 tant qu'on ne survole pas
@@ -1079,7 +1091,7 @@ dialog { background: var(--hp-surface); border-radius: 18px; }
   input, select, textarea,
   .hp-task-input-wrap input[type="text"],
   .hp-task-form input[type="date"],
-  .hp-task-date {
+  .hp-task-form input[type="time"] {
     font-size: 16px;
   }
 }

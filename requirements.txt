@@ -3,3 +3,21 @@
 # la mise en page, num2words pour écrire le montant en toutes lettres.
 fpdf2==2.8.8
 num2words==0.5.14
+
+# Notifications push réelles (Web Push / VAPID), reçues même app fermée.
+#
+# ./vendor/http_ece_vendor reconstruit localement le paquet PyPI "http-ece"
+# (RFC 8188 aes128gcm, dépendance de pywebpush) avec un pyproject.toml
+# moderne autour du même code source MIT inchangé (voir ce dossier) : le
+# seul sdist publié sur PyPI pour ce paquet échoue à se construire avec les
+# setuptools récents ("AttributeError: install_layout"). Déclarer ce chemin
+# local ici permet à pip de satisfaire la dépendance "http-ece>=1.1.0" de
+# pywebpush sans jamais tenter de la récupérer sur PyPI. Testé avec succès
+# dans un venv neuf (pip 26, Python 3.11) reproduisant l'environnement de
+# build Railway/Nixpacks.
+./vendor/http_ece_vendor
+pywebpush==2.5.0
+py-vapid==1.9.4
+cryptography==47.0.0
+requests==2.33.1
+aiohttp==3.14.4
