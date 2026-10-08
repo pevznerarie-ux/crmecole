@@ -1824,7 +1824,7 @@ function notifSettingsPanel() {
   const standalone = isStandaloneDisplay();
   return `<section class="panel pad" id="notifSettingsPanel">
     <span class="eyebrow">Rappels</span><h2>Notifications de tâches</h2>
-    <p class="muted-note">Reçois une vraie notification sur ton téléphone ou ordinateur pour tes tâches du jour et en retard, à l'heure choisie ci-dessous — même quand l'app est fermée.</p>
+    <p class="muted-note">Reçois une vraie notification sur ton téléphone ou ordinateur — même quand l'app est fermée : à l'heure précise de chaque tâche qui a une heure, plus un récapitulatif des tâches du jour et en retard à l'heure choisie ci-dessous.</p>
     ${ios && !standalone ? `<p class="muted-note"><strong>Sur iPhone/iPad :</strong> ajoute d'abord ce CRM à l'écran d'accueil (bouton Partager puis "Sur l'écran d'accueil") — c'est une exigence d'Apple, sans ça les notifications ne fonctionnent pas du tout sur iOS.</p>` : ""}
     ${pushState.permission === "denied" ? `<p class="muted-note">Les notifications sont bloquées pour ce site dans les réglages du navigateur. Autorise-les pour recevoir les rappels.</p>` : ""}
     <label class="settings-toggle-row"><input type="checkbox" id="notifEnabledToggle" ${pushState.enabled ? "checked" : ""}><span>Activer les notifications de tâches sur cet appareil</span></label>

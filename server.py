@@ -166,6 +166,20 @@ def init_push_tables(db):
         )
         """
     )
+    # Rappels à l'heure précise d'une tâche (dueDate + dueTime) : une ligne par
+    # tâche/échéance déjà notifiée, pour n'envoyer chaque rappel qu'une fois
+    # (la clé inclut date+heure : si la tâche est replanifiée, on renotifie).
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS push_task_reminders (
+            account_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            due_key TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, task_id, due_key)
+        )
+        """
+    )
 
 
 def get_or_create_vapid_keys(db):
@@ -273,7 +287,7 @@ def _send_to_subscription(priv, sub, payload):
         return False, str(exc)
 
 
-def send_push_to_account(account_id, title, body):
+def send_push_to_account(account_id, title, body, tag=None):
     """Envoie une notification push à tous les abonnements connus de ce
     compte (rappel quotidien automatique — erreurs journalisées, jamais
     remontées à l'appelant)."""
@@ -284,7 +298,10 @@ def send_push_to_account(account_id, title, body):
         subs = db.execute("SELECT * FROM push_subscriptions WHERE account_id = ?", (account_id,)).fetchall()
     if not priv or not subs:
         return
-    payload = json.dumps({"title": title, "body": body}, ensure_ascii=False)
+    message = {"title": title, "body": body}
+    if tag:
+        message["tag"] = tag
+    payload = json.dumps(message, ensure_ascii=False)
     for sub in subs:
         ok, err = _send_to_subscription(priv, sub, payload)
         if not ok:
@@ -342,6 +359,8 @@ def push_notification_tick():
         except Exception:
             continue
     for pref in prefs_rows:
+        _send_task_time_reminders(pref["account_id"], accounts_by_id, tasks, now_paris)
+    for pref in prefs_rows:
         account_id = pref["account_id"]
         if pref["last_fired_date"] == today:
             continue
@@ -372,6 +391,42 @@ def push_notification_tick():
         if len(due) > 5:
             body += f"\n… et {len(due) - 5} autre(s)"
         send_push_to_account(account_id, title, body)
+
+
+# Fenêtre de rattrapage : une tâche dont l'heure est passée depuis moins de ça
+# est encore notifiée (redémarrage du serveur, tick manqué) ; au-delà on ne
+# notifie plus, pour ne pas inonder l'utilisateur de vieux rappels.
+TASK_REMINDER_GRACE = timedelta(minutes=30)
+
+
+def _send_task_time_reminders(account_id, accounts_by_id, tasks, now_paris):
+    """Notification push à l'heure exacte d'une tâche (champ "Heure"), même
+    app fermée — en plus du récapitulatif quotidien."""
+    account = accounts_by_id.get(account_id)
+    if not account:
+        return
+    me = (account["first"] or (account["email"] or "").split("@")[0] or "").strip()
+    for t in tasks:
+        if t.get("status") == "fait" or not t.get("id") or not t.get("dueDate") or not t.get("dueTime"):
+            continue
+        if me and t.get("assignedTo") and t.get("assignedTo") != me:
+            continue
+        try:
+            due_at = datetime.strptime(f"{t['dueDate']} {t['dueTime']}", "%Y-%m-%d %H:%M").replace(tzinfo=PARIS_TZ)
+        except ValueError:
+            continue
+        if not (due_at <= now_paris < due_at + TASK_REMINDER_GRACE):
+            continue
+        due_key = f"{t['dueDate']} {t['dueTime']}"
+        with connect() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO push_task_reminders(account_id, task_id, due_key, sent_at) VALUES(?, ?, ?, ?)",
+                (account_id, t["id"], due_key, now_paris.isoformat()),
+            )
+            already_sent = cur.rowcount == 0
+        if already_sent:
+            continue
+        send_push_to_account(account_id, f"Rappel · {t['dueTime']}", t.get("title", ""), tag=f"task-{t['id']}")
 
 
 def push_notification_loop():
