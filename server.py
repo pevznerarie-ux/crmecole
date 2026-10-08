@@ -9,9 +9,18 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 import uuid
+
+# Sur Railway, stdout n'est pas un terminal : Python bufferise alors les
+# print() par blocs au lieu de ligne par ligne, et comme ce process ne
+# s'arrête jamais, les messages de démarrage ("[push] ..." notamment)
+# pouvaient rester coincés dans ce tampon indéfiniment et ne jamais
+# apparaître dans les logs. Forcer le mode ligne par ligne ici pour que
+# tous les print() de ce fichier remontent bien dans les logs Railway.
+sys.stdout.reconfigure(line_buffering=True)
 
 from fpdf import FPDF
 from num2words import num2words
@@ -237,11 +246,37 @@ def set_notif_prefs(account_id, enabled, reminder_time):
             )
 
 
+def _send_to_subscription(priv, sub, payload):
+    """Envoie à UN abonnement et renvoie (ok, erreur_ou_None). Supprime
+    automatiquement un abonnement révoqué par le navigateur (410 Gone /
+    404 Not Found, ex. app désinstallée) pour ne pas réessayer dessus."""
+    subscription_info = {
+        "endpoint": sub["endpoint"],
+        "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+    }
+    try:
+        webpush(
+            subscription_info=subscription_info,
+            data=payload,
+            vapid_private_key=priv,
+            vapid_claims={"sub": "mailto:contact@sinai-ecole.org"},
+            ttl=3600,
+            timeout=10,
+        )
+        return True, None
+    except WebPushException as exc:
+        if exc.status_code in (404, 410):
+            with connect() as db:
+                db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)
+
+
 def send_push_to_account(account_id, title, body):
     """Envoie une notification push à tous les abonnements connus de ce
-    compte. Supprime automatiquement un abonnement que le navigateur a
-    révoqué (410 Gone / 404 Not Found, ex. app désinstallée) pour ne pas
-    réessayer indéfiniment dessus."""
+    compte (rappel quotidien automatique — erreurs journalisées, jamais
+    remontées à l'appelant)."""
     if not PUSH_AVAILABLE:
         return
     with connect() as db:
@@ -251,27 +286,35 @@ def send_push_to_account(account_id, title, body):
         return
     payload = json.dumps({"title": title, "body": body}, ensure_ascii=False)
     for sub in subs:
-        subscription_info = {
-            "endpoint": sub["endpoint"],
-            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
-        }
-        try:
-            webpush(
-                subscription_info=subscription_info,
-                data=payload,
-                vapid_private_key=priv,
-                vapid_claims={"sub": "mailto:contact@sinai-ecole.org"},
-                ttl=3600,
-                timeout=10,
-            )
-        except WebPushException as exc:
-            if exc.status_code in (404, 410):
-                with connect() as db:
-                    db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
-            else:
-                print(f"[push] Echec envoi (compte {account_id}) : {exc}")
-        except Exception as exc:
-            print(f"[push] Erreur inattendue envoi push (compte {account_id}) : {exc}")
+        ok, err = _send_to_subscription(priv, sub, payload)
+        if not ok:
+            print(f"[push] Echec envoi (compte {account_id}) : {err}")
+
+
+def send_test_push(account_id):
+    """Notification de test envoyée immédiatement (bouton "Envoyer une
+    notification de test" des réglages), sans attendre l'heure du rappel ni
+    exiger de tâche due — pour vérifier le pipeline de bout en bout sans
+    ambiguïté. Renvoie un diagnostic précis plutôt que de rester silencieux,
+    car un échec silencieux ici est indiscernable d'un succès côté usager."""
+    if not PUSH_AVAILABLE:
+        return {"ok": False, "reason": "push_unavailable"}
+    with connect() as db:
+        priv, _ = get_or_create_vapid_keys(db)
+        subs = db.execute("SELECT * FROM push_subscriptions WHERE account_id = ?", (account_id,)).fetchall()
+    if not priv:
+        return {"ok": False, "reason": "no_vapid_key"}
+    if not subs:
+        return {"ok": False, "reason": "no_subscription"}
+    payload = json.dumps(
+        {"title": "Notification de test", "body": "Si tu vois ceci, les notifications push fonctionnent."},
+        ensure_ascii=False,
+    )
+    results = []
+    for sub in subs:
+        ok, err = _send_to_subscription(priv, sub, payload)
+        results.append({"ok": ok, "error": err})
+    return {"ok": any(r["ok"] for r in results), "reason": "sent" if any(r["ok"] for r in results) else "all_failed", "results": results}
 
 
 def push_notification_tick():
@@ -1217,6 +1260,10 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             reminder_time = data.get("time") or "09:00"
             set_notif_prefs(account["id"], enabled, reminder_time)
             self.send_json(public_notif_prefs(account["id"]))
+            return
+
+        if path == "/api/push/test":
+            self.send_json(send_test_push(account["id"]))
             return
 
         if path == "/api/receipt-pdf":

@@ -1732,6 +1732,12 @@ async function apiPushUnsubscribe(endpoint) {
     return false;
   }
 }
+async function apiSendTestPush() {
+  const res = await fetch(`${API_BASE}/api/push/test`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+  });
+  return res.json().catch(() => ({ ok: false, reason: "reponse_invalide" }));
+}
 
 async function refreshPushState() {
   if (!pushState.supported) return;
@@ -1788,6 +1794,25 @@ async function disablePushNotifications() {
   pushState.subscribed = false;
 }
 
+async function sendTestPushAndNotify() {
+  notify("Envoi de la notification de test…");
+  try {
+    const res = await apiSendTestPush();
+    if (res.ok) {
+      notify("Notification de test envoyée — elle devrait arriver dans quelques secondes, même app fermée.");
+    } else if (res.reason === "no_subscription") {
+      notify("Aucun abonnement actif sur cet appareil : réactive les notifications ci-dessus.");
+    } else if (res.reason === "push_unavailable") {
+      notify("Notifications push indisponibles sur ce serveur pour le moment.");
+    } else {
+      const firstError = Array.isArray(res.results) ? res.results.find(r => !r.ok)?.error : null;
+      notify(`Échec de l'envoi : ${firstError || res.reason || "erreur inconnue"}`);
+    }
+  } catch (err) {
+    notify(`Impossible de contacter le serveur pour le test : ${err?.message || err}`);
+  }
+}
+
 function notifSettingsPanel() {
   if (!pushState.supported) {
     return `<section class="panel pad" id="notifSettingsPanel">
@@ -1804,6 +1829,9 @@ function notifSettingsPanel() {
     ${pushState.permission === "denied" ? `<p class="muted-note">Les notifications sont bloquées pour ce site dans les réglages du navigateur. Autorise-les pour recevoir les rappels.</p>` : ""}
     <label class="settings-toggle-row"><input type="checkbox" id="notifEnabledToggle" ${pushState.enabled ? "checked" : ""}><span>Activer les notifications de tâches sur cet appareil</span></label>
     <div class="form-grid"><label>Heure du rappel<input type="time" id="notifTimeInput" value="${escapeHtml(pushState.time)}"></label></div>
+    ${pushState.enabled && pushState.subscribed ? `
+    <p class="muted-note">Le rappel n'envoie une notification que s'il y a au moins une tâche due ou en retard ce jour-là à l'heure choisie — pas de notification si tout est à jour. Pour vérifier tout de suite que ça fonctionne, sans attendre :</p>
+    ${action("Envoyer une notification de test", "send-test-push")}` : ""}
   </section>`;
 }
 
@@ -2775,6 +2803,7 @@ function handleAction(key) {
     // "Filtres" lui-même) sans effacer la recherche texte ni fermer le tiroir.
     "reset-filters-only": () => { state.filters = defaultFilters(); state.recordsPage = PAGE_STEP; render(); },
     "save-segment": () => saveCurrentFiltersAsSegment(),
+    "send-test-push": () => sendTestPushAndNotify(),
     "load-more-records": () => { state.recordsPage += PAGE_STEP; render(); },
     "load-more-payments": () => { state.paymentsPage += PAGE_STEP; render(); },
     "open-actions": () => { state.drawer = "actions"; render(); },
