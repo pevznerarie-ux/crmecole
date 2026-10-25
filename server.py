@@ -486,6 +486,37 @@ def create_account(email, password, first="", last="", profile="Lecture seule", 
     return public_account(row)
 
 
+def apply_emergency_password_reset():
+    """Réinitialisation de mot de passe en cas de perte, sans jamais faire
+    transiter le nouveau mot de passe par le chat ni par le code source :
+    comme le mot de passe SMTP, il se règle uniquement dans les variables
+    d'environnement Railway (RESET_PASSWORD_EMAIL + RESET_PASSWORD_NEW), que
+    Claude ne voit jamais. Un mot de passe est haché à sens unique (PBKDF2) :
+    personne, pas même l'administrateur du serveur, ne peut "retrouver"
+    l'ancien — seule une réinitialisation est possible. Ce correctif tourne
+    à chaque démarrage tant que les deux variables sont présentes : retire-les
+    de Railway juste après avoir confirmé la connexion, sinon il se
+    redéclenche (sans danger, mais inutile) à chaque redéploiement."""
+    email = (os.environ.get("RESET_PASSWORD_EMAIL") or "").strip().lower()
+    new_password = os.environ.get("RESET_PASSWORD_NEW") or ""
+    if not email or not new_password:
+        return
+    with connect() as db:
+        row = db.execute("SELECT id FROM accounts WHERE email = ?", (email,)).fetchone()
+        if not row:
+            print(f"[reset-password] Aucun compte avec l'email {email} — rien changé.")
+            return
+        digest, salt = hash_password(new_password)
+        db.execute(
+            "UPDATE accounts SET password_hash = ?, salt = ? WHERE id = ?",
+            (digest, salt, row["id"]),
+        )
+    print(
+        f"[reset-password] Mot de passe réinitialisé pour {email}. "
+        "Retire RESET_PASSWORD_EMAIL et RESET_PASSWORD_NEW des variables Railway maintenant."
+    )
+
+
 def create_session(account_id):
     token = secrets.token_urlsafe(32)
     created = now_iso()
@@ -1507,6 +1538,7 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    apply_emergency_password_reset()
     port = int(os.environ.get("PORT", "8766"))
     host = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
     server = ThreadingHTTPServer((host, port), SinaiCrmHandler)
