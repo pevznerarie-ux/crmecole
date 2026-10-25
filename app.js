@@ -282,26 +282,86 @@ function currentCrmData() {
   };
 }
 
+// Renvoie le résultat RÉEL de l'enregistrement : "ok", "denied" (refusé par
+// le serveur, ex. compte Lecture seule), "error" (autre refus serveur),
+// "offline" (pas de réseau) ou "unauthorized" (session expirée). Avant, les
+// formulaires affichaient "Enregistré" sans attendre, même quand le serveur
+// avait refusé : le contact disparaissait ensuite au rechargement. Un échec
+// est maintenant toujours signalé par un message bien visible, quel que soit
+// l'endroit de l'app qui a déclenché l'enregistrement.
+let saveWaiters = [];
 async function saveCrmData() {
-  if (saveInFlight) { savePending = true; return; }
+  if (isReadOnlyAccount()) { notify(READ_ONLY_MSG); revertToServerState(); return "denied"; }
+  if (saveInFlight) { savePending = true; return new Promise(resolve => saveWaiters.push(resolve)); }
   saveInFlight = true;
   setSaveIndicator("Enregistrement…", "busy");
   const payload = currentCrmData();
   saveLocalBackup(payload);
+  let outcome = "ok";
   try {
     const res = await fetch(`${API_BASE}/api/state`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
-    if (res.status === 401) { handleUnauthorized(); return; }
-    setSaveIndicator(res.ok ? "Enregistré" : "Enregistré localement seulement", res.ok ? "ok" : "warn");
+    if (res.status === 401) { outcome = "unauthorized"; handleUnauthorized(); }
+    else if (res.ok) { setSaveIndicator("Enregistré", "ok"); }
+    else {
+      outcome = res.status === 403 ? "denied" : "error";
+      const msg = (await res.json().catch(() => null))?.error;
+      setSaveIndicator("Non enregistré", "warn");
+      notify(`⚠ Non enregistré${msg ? ` : ${msg}` : " : le serveur a refusé la modification"}`, true);
+      if (outcome === "denied") revertToServerState();
+    }
   } catch {
+    outcome = "offline";
     setSaveIndicator("Hors ligne — enregistré sur cet appareil", "warn");
+    notify("⚠ Hors ligne : enregistré sur cet appareil seulement, pas encore sur le serveur", true);
   } finally {
     saveInFlight = false;
-    if (savePending) { savePending = false; saveCrmData(); }
+    if (savePending) {
+      savePending = false;
+      const waiters = saveWaiters;
+      saveWaiters = [];
+      saveCrmData().then(o => waiters.forEach(w => w(o)));
+    }
   }
+  return outcome;
+}
+
+// Après un refus du serveur, la copie locale contient des modifications qui
+// n'existent pas côté serveur : on la remplace par la vraie version, pour
+// ne pas laisser à l'écran (et dans la sauvegarde locale) un contact ou un
+// don "fantôme" qui disparaîtrait au prochain rechargement.
+async function revertToServerState() {
+  const server = await apiGetState();
+  if (!server) return;
+  applyCrmData(server, true);
+  saveLocalBackup(currentCrmData());
+  render();
+}
+
+const READ_ONLY_MSG = "Compte en lecture seule : vous pouvez consulter, mais pas modifier";
+function isReadOnlyAccount() {
+  return !!currentAccount && currentAccount.profile === "Lecture seule";
+}
+// Actions qui modifient des données : masquées pour un compte Lecture seule
+// (body.read-only, voir styles.css) et bloquées ici par sécurité si l'une
+// d'elles reste atteignable.
+const WRITE_ACTION_RE = /^(add-|delete-|edit-|quick-|dedupe-(delete|merge|separate)|toggle-task|toggle-portfolio|portfolio-touch|generate-receipts|regenerate-receipt|import-new|save-segment|holiday-prepare)/;
+
+// Compte à accès restreint par catégorie : le serveur n'enregistre que les
+// fiches portant une de ses étiquettes/segments/groupes. Une fiche créée
+// (ou modifiée) sans l'une d'elles était donc ignorée sans prévenir et
+// disparaissait au rechargement : on lui ajoute la première étiquette du
+// périmètre du compte pour qu'elle reste visible et enregistrée.
+function ensureInAccountScope(record) {
+  if (!record || record.kind === "Structure" || currentAccount?.scopeMode !== "tags") return;
+  const allowed = (currentAccount.scopeTags || []).map(t => String(t).toLowerCase());
+  if (!allowed.length) return;
+  const labels = [...(record.tags || []), ...(record.segments || []), ...(record.groups || [])].map(t => String(t).toLowerCase());
+  if (labels.some(l => allowed.includes(l))) return;
+  record.tags = [...(record.tags || []), currentAccount.scopeTags[0]];
 }
 
 function logAudit(text) {
@@ -1004,12 +1064,13 @@ const dialogContent = () => document.querySelector("#dialogContent");
 const drawerEl = () => document.querySelector("#drawer");
 const toastEl = () => document.querySelector("#toast");
 
-function notify(message) {
+function notify(message, warn = false) {
   const toast = toastEl();
   toast.textContent = message;
+  toast.classList.toggle("warn", !!warn);
   toast.classList.add("show");
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
+  state.toastTimer = setTimeout(() => toast.classList.remove("show"), warn ? 6000 : 2600);
 }
 
 /* ---------- 6. Rendu des vues -------------------------------------------- */
@@ -1082,6 +1143,15 @@ function setHeader() {
   // de gros titre à elles et en ont toujours besoin.
   const topbarEl = document.querySelector(".topbar");
   if (topbarEl) topbarEl.classList.toggle("topbar-hidden", state.view === "home");
+  // Doublons/Importer ne concernent que les fiches, Exporter que les listes
+  // de fiches et de paiements : on ne les montre que là, au lieu de les
+  // laisser sur toutes les pages (un "Exporter" depuis Paramètres
+  // téléchargeait la dernière liste consultée, sans rapport avec l'écran).
+  const onRecords = state.view === "crm" && ["Contacts", "Structures"].includes(state.section);
+  const onPayments = state.view === "pay" && state.section !== "Reçus";
+  document.querySelector("#dupBtn")?.toggleAttribute("hidden", !onRecords);
+  document.querySelector("#importBtn")?.toggleAttribute("hidden", !onRecords);
+  document.querySelector("#exportBtn")?.toggleAttribute("hidden", !(onRecords || onPayments));
 }
 
 function metric(label, value, note) {
@@ -1129,12 +1199,12 @@ function home() {
   const todayLabel = now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   return `
     <div class="home-premium">
+      <!-- Logo seulement sur mobile, où la barre latérale (qui l'affiche
+           déjà avec l'accroche) est cachée : voir .hp-brand-row. -->
       <div class="hp-brand-row">
         <img class="hp-brand-logo" src="./assets/logo-sinai.png" alt="Sinaï">
-        <span class="hp-brand-tagline">Chaque famille compte. Chaque geste fait grandir Sinaï.</span>
       </div>
       <div class="hp-topline">
-        <span class="hp-eyebrow">Les institutions Sinaï</span>
         <span class="hp-date">${escapeHtml(todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1))}</span>
       </div>
       <header class="hp-hero">
@@ -1641,6 +1711,7 @@ function quickCreateContact(name) {
     importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0,
     address: "", family: "", source: "Manuel", dateAdded: todayStr(),
   };
+  ensureInAccountScope(record);
   records.unshift(record);
   // recordById() lit l'index recordsIndex, reconstruit seulement au prochain
   // render() complet : sans cette ligne, un buildTask() appelé juste après
@@ -2163,10 +2234,6 @@ function linkagesView() {
   </section>`;
 }
 
-function panelList(title, rows, btnLabel, btnAction) {
-  return `<section class="panel pad"><div class="toolbar"><h2>${title}</h2>${action(btnLabel, btnAction, "primary-btn")}</div>${rows.length ? `<div class="timeline">${rows.map(([label, key])=>`<button class="timeline-item" type="button" data-action="${key}"><strong>${label}</strong></button>`).join("")}</div>` : emptyState("Rien à afficher pour l'instant.")}</section>`;
-}
-
 function paymentTable(type = null) {
   const rows = filteredPayments(type);
   const { visible, remaining } = visiblePage(rows, "paymentsPage");
@@ -2503,14 +2570,16 @@ function syncBottomNav() {
 function buildFabMenu() {
   const menu = document.querySelector("#fabMenu");
   if (!menu) return;
+  // Mêmes clés d'action que les boutons de l'accueil et des listes : un seul
+  // chemin (handleAction) pour "Nouveau contact" & co., où qu'on clique.
   menu.innerHTML = `
-    <button type="button" data-fab-open="interaction">Interaction</button>
-    <button type="button" data-fab-open="payment">Don / paiement</button>
-    <button type="button" data-fab-open="comment">Commentaire</button>
-    <button type="button" data-fab-open="contact">Nouveau contact</button>
-    <button type="button" data-fab-open="structure">Nouvelle structure</button>
+    <button type="button" data-fab-action="add-interaction">Interaction</button>
+    <button type="button" data-fab-action="add-payment:Don">Don / paiement</button>
+    <button type="button" data-fab-action="add-comment">Commentaire</button>
+    <button type="button" data-fab-action="add-contact">Nouveau contact</button>
+    <button type="button" data-fab-action="add-structure">Nouvelle structure</button>
   `;
-  menu.querySelectorAll("[data-fab-open]").forEach(btn => btn.addEventListener("click", () => { closeFabMenu(); openModal(btn.dataset.fabOpen); }));
+  menu.querySelectorAll("[data-fab-action]").forEach(btn => btn.addEventListener("click", () => { closeFabMenu(); handleAction(btn.dataset.fabAction); }));
   document.querySelector("#fabScrim")?.addEventListener("click", closeFabMenu);
 }
 function openFabMenu() {
@@ -2632,6 +2701,18 @@ function bind() {
     render();
   }));
   document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); handleAction(el.dataset.action); }));
+  // Lignes de tableau cliquables (<tr data-action>) : pas des boutons, donc
+  // inatteignables au clavier et muettes pour un lecteur d'écran. On les rend
+  // focalisables et activables avec Entrée/Espace.
+  document.querySelectorAll("tr[data-action], div[data-action], tr[data-record]").forEach(el => {
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.addEventListener("keydown", e => {
+      if (e.target !== el || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      el.click();
+    });
+  });
   document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details"; render(); scrollToTop(); }));
   // Les pastilles de la fiche contact ne reconstruisent plus toute la page :
   // tout est déjà affiché (une seule page qui défile), donc un clic se
@@ -2819,6 +2900,7 @@ function scrollToTop() {
 
 function handleAction(key) {
   if (!key) return;
+  if (isReadOnlyAccount() && WRITE_ACTION_RE.test(key)) return notify(READ_ONLY_MSG);
   // "open-record:<id>" ouvre la fiche sur l'onglet Détails ; "open-record:<id>:<Onglet>"
   // ouvre directement sur l'onglet pertinent (ex : un clic sur un don ouvre la fiche
   // sur "Paiements", un clic sur une interaction l'ouvre sur "Activité") pour qu'on
@@ -2885,6 +2967,7 @@ function handleAction(key) {
 
   const actions = {
     "add-contact": () => openModal("contact"),
+    "add-comment": () => openModal("comment"),
     "add-structure": () => openModal("structure"),
     "add-user": () => openModal("account"),
     "add-field": () => openModal("field"),
@@ -3343,10 +3426,12 @@ function submitForm(event) {
   if (required.length) { notify("Complétez les champs obligatoires"); return; }
 
   if (kind === "account") { submitAccountForm(form); return; }
+  if (isReadOnlyAccount()) { dialog().close(); notify(READ_ONLY_MSG); return; }
 
   const handlers = {
     contact: () => {
       const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first, last: data.last, name: `${data.first} ${data.last}`.trim(), email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, source: "Manuel", family: data.family, dateAdded: todayStr() };
+      ensureInAccountScope(record);
       records.unshift(record); state.selectedRecord = record.id; logAudit(`Contact ajouté : ${record.name}.`); navigate("crm", "Contacts");
     },
     structure: () => {
@@ -3478,6 +3563,7 @@ function submitForm(event) {
         // modifier le prénom/nom d'une fiche existante ne mettait jamais à
         // jour son nom affiché ailleurs dans l'app.
         if (r.kind !== "Structure" && (r.first || r.last)) r.name = `${r.first || ""} ${r.last || ""}`.trim();
+        ensureInAccountScope(r);
         r.dateModified = todayStr();
         state.tab = "Details";
         logAudit(`Fiche modifiée : ${r.name}.`);
@@ -3486,9 +3572,10 @@ function submitForm(event) {
   };
   dialog().close();
   (handlers[kind] || (() => {}))();
-  saveCrmData();
   render();
-  notify("Enregistré");
+  // "Enregistré" seulement une fois le serveur d'accord : en cas d'échec,
+  // saveCrmData affiche lui-même pourquoi.
+  saveCrmData().then(outcome => { if (outcome === "ok") notify("Enregistré"); });
 }
 
 function deleteSelectedRecord() {
@@ -3754,7 +3841,9 @@ function confirmImport() {
     if (match) {
       Object.entries(mapped).forEach(([k, v]) => { if (v !== "" && !(Array.isArray(v) && !v.length)) match[k] = v; });
     } else {
-      records.push({ id: nextId("C", records), kind: "Contact", source: `Import ${p.fileName}`, dateAdded: todayStr(), ...mapped });
+      const imported = { id: nextId("C", records), kind: "Contact", source: `Import ${p.fileName}`, dateAdded: todayStr(), ...mapped };
+      ensureInAccountScope(imported);
+      records.push(imported);
     }
   });
   imports.unshift({ status: "Terminé", date: todayStr(), file: p.fileName, user: currentUserLabel(), type: "Contacts", rows: p.rows, errors: 0, created: p.created, updated: p.updated, duplicates: p.updated, rejected: 0 });
@@ -3849,6 +3938,7 @@ function updateProfileCard() {
   if (!card || !currentAccount) return;
   const name = `${currentAccount.first || ""} ${currentAccount.last || ""}`.trim() || currentAccount.email;
   const scopeNote = currentAccount.scopeMode === "tags" ? "Accès restreint par catégorie" : "Accès à tous les contacts";
+  document.body.classList.toggle("read-only", isReadOnlyAccount());
   card.innerHTML = `<span class="eyebrow">${escapeHtml(currentAccount.profile)}</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(currentAccount.email)} · ${escapeHtml(scopeNote)}</p>`;
 }
 
@@ -3876,37 +3966,41 @@ async function boot() {
   bootApp();
 }
 
+// fromServer : la version serveur fait foi, même vide (utilisé après un
+// refus d'enregistrement pour effacer les fiches "fantômes" locales).
+function applyCrmData(data, fromServer = false) {
+  records = Array.isArray(data.records) && (data.records.length || fromServer) ? data.records : records;
+  payments = Array.isArray(data.payments) ? data.payments : payments;
+  imports = Array.isArray(data.imports) && data.imports.length ? data.imports : imports;
+  users = Array.isArray(data.users) && data.users.length ? data.users : users;
+  groups = Array.isArray(data.groups) ? data.groups : groups;
+  interactions = Array.isArray(data.interactions) ? data.interactions : interactions;
+  linkages = Array.isArray(data.linkages) ? data.linkages : linkages;
+  customFields = Array.isArray(data.customFields) && data.customFields.length ? data.customFields : customFields;
+  receiptTemplates = Array.isArray(data.receiptTemplates) && data.receiptTemplates.length ? data.receiptTemplates : receiptTemplates;
+  savedViews = Array.isArray(data.savedViews) ? data.savedViews : savedViews;
+  auditLog = Array.isArray(data.auditLog) ? data.auditLog : auditLog;
+  interactionCategories = Array.isArray(data.interactionCategories) && data.interactionCategories.length ? data.interactionCategories : interactionCategories;
+  tasks = Array.isArray(data.tasks) ? data.tasks : tasks;
+  holidayNotes = (data.holidayNotes && typeof data.holidayNotes === "object") ? data.holidayNotes : holidayNotes;
+  receiptLog = Array.isArray(data.receiptLog) ? data.receiptLog : receiptLog;
+  dismissedDuplicates = Array.isArray(data.dismissedDuplicates) ? data.dismissedDuplicates : dismissedDuplicates;
+  if (data.state?.selectedRecord && records.some(r => r.id === data.state.selectedRecord)) {
+    state.selectedRecord = data.state.selectedRecord;
+  }
+}
+
 async function bootApp() {
   updateProfileCard();
   await refreshAccounts();
   seedFromImportedContacts();
   const server = await apiGetState();
   const backup = server || loadLocalBackup();
-  if (backup) {
-    records = Array.isArray(backup.records) && backup.records.length ? backup.records : records;
-    payments = Array.isArray(backup.payments) ? backup.payments : payments;
-    imports = Array.isArray(backup.imports) && backup.imports.length ? backup.imports : imports;
-    users = Array.isArray(backup.users) && backup.users.length ? backup.users : users;
-    groups = Array.isArray(backup.groups) ? backup.groups : groups;
-    interactions = Array.isArray(backup.interactions) ? backup.interactions : interactions;
-    linkages = Array.isArray(backup.linkages) ? backup.linkages : linkages;
-    customFields = Array.isArray(backup.customFields) && backup.customFields.length ? backup.customFields : customFields;
-    receiptTemplates = Array.isArray(backup.receiptTemplates) && backup.receiptTemplates.length ? backup.receiptTemplates : receiptTemplates;
-    savedViews = Array.isArray(backup.savedViews) ? backup.savedViews : savedViews;
-    auditLog = Array.isArray(backup.auditLog) ? backup.auditLog : auditLog;
-    interactionCategories = Array.isArray(backup.interactionCategories) && backup.interactionCategories.length ? backup.interactionCategories : interactionCategories;
-    tasks = Array.isArray(backup.tasks) ? backup.tasks : tasks;
-    holidayNotes = (backup.holidayNotes && typeof backup.holidayNotes === "object") ? backup.holidayNotes : holidayNotes;
-    receiptLog = Array.isArray(backup.receiptLog) ? backup.receiptLog : receiptLog;
-    dismissedDuplicates = Array.isArray(backup.dismissedDuplicates) ? backup.dismissedDuplicates : dismissedDuplicates;
-    if (backup.state?.selectedRecord && records.some(r => r.id === backup.state.selectedRecord)) {
-      state.selectedRecord = backup.state.selectedRecord;
-    }
-  }
+  if (backup) applyCrmData(backup);
   if (!state.selectedRecord && records.length) state.selectedRecord = records[0].id;
   // Pose déjà un rappel dès qu'une fête approche (pas besoin de cliquer un
   // bouton pour y penser) : voir ensureHolidayReminders plus haut.
-  if (ensureHolidayReminders()) saveCrmData();
+  if (ensureHolidayReminders() && !isReadOnlyAccount()) saveCrmData();
   state.booted = true;
   render();
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
