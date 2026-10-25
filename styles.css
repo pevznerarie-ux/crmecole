@@ -1,77 +1,86 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 /* ============================================================
-   Système de couleurs UNIQUE de l'application (fusion de l'ancien
-   système générique et de l'ancien système "hp-*" de l'accueil, qui
-   coexistaient et produisaient des pages à l'air visuellement
-   différentes). Une seule échelle, claire, réutilisée partout : accueil,
-   tableaux, formulaires, fenêtres modales. L'accent reste la terracotta
-   de la marque Sinaï, mais n'est utilisé que pour les actions et les
-   accents — jamais comme couleur de fond de grande surface.
+   Système de couleurs UNIQUE de l'application — direction "chic, sobre,
+   style Apple" validée avec l'utilisateur (fond neutre froid #f5f5f7,
+   cartes blanches sans bordure visible — juste une ombre légère —,
+   grands rayons d'angle, boutons pleinement arrondis, police système).
+   L'accent de marque passe du rouille/terracotta à un bronze profond :
+   l'utilisateur a explicitement choisi de s'affranchir de la couleur du
+   logo ("le logo, on peut faire ce qu'on veut avec"). Le bronze n'est
+   plus utilisé que pour l'action principale de chaque écran — jamais en
+   fond de grande surface, jamais sur les avatars/badges décoratifs (qui
+   passent en neutre, voir .avatar plus bas).
    Mode sombre : mêmes variables, redéfinies sous [data-theme="dark"],
    activé/mémorisé par le bouton de la barre latérale (voir app.js). */
 :root {
-  --bg: #f7f6f3;
+  --bg: #f5f5f7;
   --surface: #ffffff;
-  --surface-alt: #f1efe9;
-  --ink: #221d18;
-  --ink-soft: #4a443d;
-  --muted: #7a7266;
-  --line: #e6e2d9;
-  --line-strong: #d6d0c3;
-  --accent: #a8532c;
-  --accent-2: #833f21;
-  --accent-soft: #f2e2d2;
-  --accent-alt: #0891b2;
+  --surface-alt: #ececee;
+  --ink: #1d1d1f;
+  --ink-soft: #424245;
+  --muted: #86868b;
+  --line: #e3e3e6;
+  --line-strong: #d2d2d7;
+  --accent: #8c6a3f;
+  --accent-2: #6e5330;
+  --accent-soft: #efe7da;
+  --accent-alt: #0071e3;
   /* Couleur de texte/icône à poser SUR une surface remplie d'--accent (ou
      --warn/--danger) : blanc en mode clair, mais en mode sombre l'accent
      s'éclaircit pour rester lisible sur fond sombre, donc le texte doit au
      contraire s'assombrir — d'où un token dédié plutôt que "#fff" en dur. */
-  --on-accent: #fffdfa;
-  --success: #2f7d4f;
-  --success-soft: #e8f4ec;
-  --warn: #b8762c;
-  --warn-soft: #fbf1e2;
-  --danger: #b23b2e;
-  --danger-soft: #fbeae7;
-  --shadow: 0 12px 28px rgba(34, 29, 24, .14), 0 4px 10px rgba(34, 29, 24, .06);
-  --shadow-soft: 0 1px 2px rgba(34, 29, 24, .06);
-  --shadow-card: 0 1px 2px rgba(34, 29, 24, .04), 0 1px 3px rgba(34, 29, 24, .07);
-  --shadow-card-hover: 0 4px 6px rgba(34, 29, 24, .05), 0 12px 24px rgba(34, 29, 24, .09);
-  --radius: 10px;
-  --radius-lg: 14px;
-  /* Police "display" (titres, montants, chiffres clés) : la même partout,
-     sur l'accueil comme sur les tableaux — avant, seul l'accueil utilisait
-     Fraunces, le reste utilisait la police de texte courant, ce qui donnait
-     deux identités typographiques différentes selon l'écran. */
-  --display: "Fraunces", "Iowan Old Style", Georgia, serif;
-  font-family: "Inter", "Segoe UI", Arial, sans-serif;
+  --on-accent: #ffffff;
+  --success: #248a3d;
+  --success-soft: #e6f4ea;
+  --warn: #b8862f;
+  --warn-soft: #faf1df;
+  --danger: #d0362b;
+  --danger-soft: #fbeae8;
+  --shadow: 0 2px 10px rgba(0, 0, 0, .06), 0 20px 48px rgba(0, 0, 0, .1);
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, .05);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, .05), 0 1px 2px rgba(0, 0, 0, .04);
+  --shadow-card-hover: 0 4px 14px rgba(0, 0, 0, .09), 0 2px 4px rgba(0, 0, 0, .06);
+  /* --radius : composants (champs, badges, petites cartes). --radius-lg :
+     grandes cartes/panneaux/fenêtres. --radius-pill : boutons — tous les
+     boutons bruts <button> sont pleinement arrondis par défaut (règle
+     "button" plus bas), à l'image des boutons "pilule" d'Apple. */
+  --radius: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 980px;
+  /* Police système : sur Mac et iPhone, -apple-system EST San Francisco,
+     la police native d'Apple — sans avoir à la charger ni enfreindre de
+     licence. Inter sert de repli propre sur Windows/Android/Linux. Une
+     seule famille partout (plus de serif Fraunces, qui donnait un ton
+     "éditorial" à l'accueil, différent du reste de l'app). */
+  --display: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Arial, sans-serif;
 }
 
 :root[data-theme="dark"] {
-  --bg: #17140f;
-  --surface: #211c16;
-  --surface-alt: #2a241c;
-  --ink: #f0ebe2;
-  --ink-soft: #d2c9bb;
-  --muted: #9b9185;
-  --line: #3c352c;
-  --line-strong: #4a4136;
-  --accent: #e2884f;
-  --accent-2: #c96a35;
-  --accent-soft: #3c2a1c;
-  --accent-alt: #38bcd6;
-  --on-accent: #201a14;
-  --success: #6fb588;
-  --success-soft: #1f3327;
-  --warn: #dba65c;
+  --bg: #000000;
+  --surface: #1c1c1e;
+  --surface-alt: #242426;
+  --ink: #f5f5f7;
+  --ink-soft: #c7c7cc;
+  --muted: #98989d;
+  --line: #38383a;
+  --line-strong: #48484a;
+  --accent: #cf9a66;
+  --accent-2: #b9834f;
+  --accent-soft: #3a2f22;
+  --accent-alt: #409cff;
+  --on-accent: #241a0e;
+  --success: #32a852;
+  --success-soft: #16321f;
+  --warn: #d6a35c;
   --warn-soft: #3a2d17;
-  --danger: #e0806c;
+  --danger: #e0645a;
   --danger-soft: #3a211c;
-  --shadow: 0 12px 28px rgba(0, 0, 0, .45), 0 4px 10px rgba(0, 0, 0, .25);
-  --shadow-soft: 0 1px 2px rgba(0, 0, 0, .3);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, .25), 0 1px 3px rgba(0, 0, 0, .3);
-  --shadow-card-hover: 0 4px 6px rgba(0, 0, 0, .3), 0 12px 24px rgba(0, 0, 0, .4);
+  --shadow: 0 2px 10px rgba(0, 0, 0, .3), 0 20px 48px rgba(0, 0, 0, .5);
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, .3);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, .3), 0 1px 2px rgba(0, 0, 0, .25);
+  --shadow-card-hover: 0 4px 14px rgba(0, 0, 0, .4), 0 2px 4px rgba(0, 0, 0, .3);
 }
 
 /* Sous prefers-color-scheme sans préférence enregistrée (première visite) :
@@ -79,29 +88,29 @@
    via le bouton, data-theme="light"/"dark" prend le dessus (voir app.js). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]):not([data-theme="dark"]) {
-    --bg: #17140f;
-    --surface: #211c16;
-    --surface-alt: #2a241c;
-    --ink: #f0ebe2;
-    --ink-soft: #d2c9bb;
-    --muted: #9b9185;
-    --line: #3c352c;
-    --line-strong: #4a4136;
-    --accent: #e2884f;
-    --accent-2: #c96a35;
-    --accent-soft: #3c2a1c;
-    --accent-alt: #38bcd6;
-    --on-accent: #201a14;
-    --success: #6fb588;
-    --success-soft: #1f3327;
-    --warn: #dba65c;
+    --bg: #000000;
+    --surface: #1c1c1e;
+    --surface-alt: #242426;
+    --ink: #f5f5f7;
+    --ink-soft: #c7c7cc;
+    --muted: #98989d;
+    --line: #38383a;
+    --line-strong: #48484a;
+    --accent: #cf9a66;
+    --accent-2: #b9834f;
+    --accent-soft: #3a2f22;
+    --accent-alt: #409cff;
+    --on-accent: #241a0e;
+    --success: #32a852;
+    --success-soft: #16321f;
+    --warn: #d6a35c;
     --warn-soft: #3a2d17;
-    --danger: #e0806c;
+    --danger: #e0645a;
     --danger-soft: #3a211c;
-    --shadow: 0 12px 28px rgba(0, 0, 0, .45), 0 4px 10px rgba(0, 0, 0, .25);
-    --shadow-soft: 0 1px 2px rgba(0, 0, 0, .3);
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, .25), 0 1px 3px rgba(0, 0, 0, .3);
-    --shadow-card-hover: 0 4px 6px rgba(0, 0, 0, .3), 0 12px 24px rgba(0, 0, 0, .4);
+    --shadow: 0 2px 10px rgba(0, 0, 0, .3), 0 20px 48px rgba(0, 0, 0, .5);
+    --shadow-soft: 0 1px 3px rgba(0, 0, 0, .3);
+    --shadow-card: 0 1px 3px rgba(0, 0, 0, .3), 0 1px 2px rgba(0, 0, 0, .25);
+    --shadow-card-hover: 0 4px 14px rgba(0, 0, 0, .4), 0 2px 4px rgba(0, 0, 0, .3);
   }
 }
 
@@ -118,7 +127,11 @@ p { color: var(--muted); line-height: 1.6; }
 button {
   min-height: 38px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  /* Boutons pleinement arrondis par défaut ("pilule") : le geste Apple.
+     Les cartes/champs/badges gardent --radius (rectangle arrondi) — seul
+     ce point d'entrée change, donc ça couvre tous les <button> bruts de
+     l'app sans toucher au reste. */
+  border-radius: var(--radius-pill);
   padding: 0 15px;
   background: var(--surface);
   color: var(--ink-soft);
@@ -174,7 +187,7 @@ nav { display: grid; gap: 2px; }
   min-height: 36px;
   padding: 0 12px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--ink-soft);
   text-align: left;
@@ -183,7 +196,10 @@ nav { display: grid; gap: 2px; }
   letter-spacing: 0;
   transition: background .14s ease, color .14s ease;
 }
-.nav-btn.active { background: var(--accent); color: var(--on-accent); }
+/* Onglet actif : noir/blanc selon le thème plutôt que l'accent bronze —
+   l'accent reste réservé à l'action principale (bouton "Ajouter" etc.),
+   pas à l'état "sélectionné" d'une navigation, pour ne pas le diluer. */
+.nav-btn.active { background: var(--ink); color: var(--bg); }
 .nav-btn:hover:not(.active) { background: var(--surface-alt); color: var(--ink); }
 .subnav { display: none; gap: 1px; padding: 3px 0 10px 13px; }
 .nav-group:has(.nav-btn.active) .subnav { display: grid; }
@@ -237,7 +253,7 @@ main { min-width: 0; }
 .topbar p { margin-top: 3px; font-size: 13px; }
 .topbar-top { display: flex; align-items: center; gap: 14px; }
 .top-actions, .toolbar, .row-actions, .tabs, .pay-tabs, .segmented, .hero-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.primary-btn { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 4px 12px -2px rgba(168, 83, 44, .3); }
+.primary-btn { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 4px 12px -2px rgba(140, 106, 63, .3); }
 .primary-btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--on-accent); }
 .top-btn { min-width: 90px; background: var(--surface); }
 .icon-btn { width: 38px; padding: 0; font-size: 12px; font-weight: 750; }
@@ -287,7 +303,10 @@ main { min-width: 0; }
    proprement dans son propre cadre (.table-wrap { overflow: auto }). */
 .panel { box-shadow: var(--shadow-card); transition: box-shadow .16s ease; min-width: 0; }
 .metric-grid .metric { border: 0; border-radius: 0; box-shadow: none; position: relative; }
-.metric-grid .metric::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--accent); opacity: .85; }
+/* Liseré neutre plutôt que bronze : sur un tableau de bord avec plusieurs
+   cartes "metric" côte à côte, un trait de couleur sur CHAQUE carte dilue
+   l'accent — même logique que pour l'avatar et les onglets actifs. */
+.metric-grid .metric::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--line-strong); opacity: .85; }
 .metric { padding: 18px; }
 .metric strong { display: block; margin: 9px 0 4px; font-family: var(--display); font-size: 26px; line-height: 1; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 .metric p { font-size: 12px; }
@@ -333,8 +352,8 @@ main { min-width: 0; }
   width: min(520px, 100%);
   min-height: 40px;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  padding: 9px 13px;
+  border-radius: var(--radius-pill);
+  padding: 9px 16px;
   background: var(--surface);
   color: var(--ink);
 }
@@ -381,6 +400,10 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .status.bad { background: var(--danger-soft); color: var(--danger); }
 
 .detail-card { position: sticky; top: 106px; overflow: hidden; box-shadow: var(--shadow-card); }
+/* Bandeau "toujours sombre" quel que soit le thème (repère visuel
+   constant, voir commentaire historique plus bas sur --ink) — recoloré en
+   gris charbon neutre : l'accent bronze n'est plus utilisé ici, pour
+   éviter l'effet "couleur de marque partout" qui faisait moins classe. */
 .detail-head {
   position: relative;
   display: grid;
@@ -388,25 +411,27 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   gap: 14px;
   align-items: center;
   padding: 19px;
-  background: linear-gradient(135deg, #4a2413, #241a10);
+  background: linear-gradient(165deg, #2c2c2e, #1d1d1f);
   color: #fff;
 }
 .detail-close { position: absolute; top: 14px; right: 14px; background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .2); color: #fff; }
 .detail-close:hover { background: rgba(255, 255, 255, .2); border-color: rgba(255, 255, 255, .32); }
 .detail-head p { color: rgba(255, 255, 255, .6); }
-.detail-head .eyebrow { color: #f0c9a8; }
+.detail-head .eyebrow { color: #c7c7cc; }
+/* Avatar (initiale) : neutre et translucide plutôt que rempli d'accent —
+   l'accent bronze reste réservé à l'action principale de chaque écran. */
 .avatar {
   width: 54px;
   height: 54px;
   display: grid;
   place-items: center;
-  border-radius: var(--radius);
-  background: linear-gradient(155deg, var(--accent), var(--accent-2));
-  color: var(--on-accent);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .14);
+  border: 1px solid rgba(255, 255, 255, .18);
+  color: #fff;
   font-family: var(--display);
   font-weight: 700;
   font-size: 16px;
-  box-shadow: 0 3px 8px rgba(168, 83, 44, .35);
 }
 .detail-kpis { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--surface-alt); }
 .detail-kpis div { padding: 13px 12px; border-right: 1px solid var(--line); }
@@ -415,8 +440,19 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .detail-kpis span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
 .tabs, .pay-tabs { padding: 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .tab-btn, .pay-tabs button, .segmented button { min-height: 32px; background: var(--surface-alt); border-color: transparent; }
-.tab-btn.active, .pay-tabs button.active { background: var(--accent); color: var(--on-accent); }
-.detail-body { display: grid; gap: 14px; padding: 15px; }
+/* Même principe que .nav-btn.active : l'onglet sélectionné se distingue en
+   noir/blanc (ink/bg), pas avec l'accent bronze — réservé aux actions
+   principales — pour que tous les onglets de l'appli (barre latérale,
+   fiche contact, paiements) suivent la même règle. */
+.tab-btn.active, .pay-tabs button.active { background: var(--ink); color: var(--bg); }
+/* Fiche contact : la fiche est désormais UNE page qui défile (toutes les
+   sections sont toujours là) ; ces pastilles ne servent plus qu'à sauter
+   jusqu'à une section (scrollIntoView) au lieu de cacher les 5 autres. */
+.detail-jumpnav { flex-wrap: wrap; gap: 6px; display: flex; }
+.detail-body { display: flex; flex-direction: column; gap: 4px; padding: 0 15px 15px; }
+.detail-section { padding-top: 18px; scroll-margin-top: 8px; }
+.detail-section + .detail-section { border-top: 1px solid var(--line); }
+.detail-section-title { margin: 0 0 12px; font-family: var(--display); font-size: 15px; font-weight: 700; color: var(--ink); }
 /* min-width: 0 sur ces grilles à deux colonnes (et sur `label` plus bas) :
    comme .content/.panel plus haut, une grille (ou un <label>, lui-même en
    display:grid) refuse par défaut de rétrécir sous la largeur minimale de
@@ -455,7 +491,7 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .folder-grid button { min-height: 0; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; text-align: left; background: var(--surface-alt); border-color: transparent; }
 .folder-grid button:hover { background: var(--accent-soft); color: var(--accent-2); }
 .import-drop { width: calc(100% - 30px); margin: 15px; padding: 17px; border-radius: var(--radius-lg); border: 1px dashed var(--line-strong); background: var(--surface-alt); text-align: left; height: auto; }
-.toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 12px 16px; border-radius: var(--radius); background: var(--ink); color: var(--bg); box-shadow: var(--shadow); transform: translateY(18px); opacity: 0; pointer-events: none; transition: .2s ease; font-size: 13.5px; }
+.toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 12px 18px; border-radius: var(--radius-pill); background: var(--ink); color: var(--bg); box-shadow: var(--shadow); transform: translateY(18px); opacity: 0; pointer-events: none; transition: .2s ease; font-size: 13.5px; }
 .toast.show { transform: translateY(0); opacity: 1; }
 /* z-index 19 (et non 15 comme avant) : passe au-dessus du bouton flottant "+"
    (.fab, z-index 18) et de son menu/scrim, qui sinon restaient visibles et
@@ -536,6 +572,30 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
      affichée ; le bouton "✕ Fermer et voir toute la liste" sur la fiche
      permet d'y revenir. */
   .records-layout.mobile-detail-open .records-panel { display: none; }
+  /* La fiche contact devient une vraie page plein écran plutôt qu'un
+     panneau étroit coincé dans la colonne : elle recouvre tout le viewport,
+     défile elle-même, et son bandeau (nom/avatar) reste visible en haut
+     comme la barre de titre d'un écran dédié. body.detail-fullscreen
+     (posé par app.js pendant que state.mobileDetailOpen est vrai) masque
+     en même temps la barre de nav du bas et le "+" flottant, qui n'ont pas
+     leur place sur un écran qui se comporte comme une page à part. */
+  .records-layout.mobile-detail-open .detail-card {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    height: 100vh;
+    height: 100dvh;
+    height: var(--vvh, 100dvh);
+    margin: 0;
+    border-radius: 0;
+    box-shadow: none;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .records-layout.mobile-detail-open .detail-head { flex: none; position: sticky; top: 0; z-index: 2; padding-top: calc(19px + env(safe-area-inset-top, 0px)); }
+  .records-layout.mobile-detail-open .detail-actions { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  body.detail-fullscreen .bottom-nav, body.detail-fullscreen .fab, body.detail-fullscreen .fab-menu, body.detail-fullscreen .fab-scrim { display: none; }
   .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   /* "Modifier toute la fiche" (wide-dialog) gardait ses 4 colonnes fixes
@@ -604,7 +664,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
   }
   .bnav-btn:hover { background: transparent; color: var(--muted); }
   .bnav-btn svg { width: 22px; height: 22px; }
-  .bnav-btn.active { color: var(--accent); }
+  .bnav-btn.active { color: var(--ink); }
   .bnav-btn:active { transform: none; }
   .bnav-menu {
     position: relative;
@@ -615,7 +675,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
     border-radius: 50%;
     background: linear-gradient(155deg, var(--accent), var(--accent-2));
     color: var(--on-accent);
-    box-shadow: 0 8px 18px rgba(168, 83, 44, .38);
+    box-shadow: 0 8px 18px rgba(140, 106, 63, .38);
   }
   .bnav-menu svg { width: 21px; height: 21px; }
   .bnav-menu:hover { background: linear-gradient(155deg, var(--accent), var(--accent-2)); color: var(--on-accent); }
@@ -709,8 +769,8 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
   left: 18px;
   bottom: 18px;
   z-index: 25;
-  padding: 8px 14px;
-  border-radius: var(--radius);
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   border: 1px solid var(--line-strong);
   color: var(--ink-soft);
@@ -748,10 +808,10 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
   border: 0;
   font-size: 26px;
   line-height: 1;
-  box-shadow: 0 10px 24px rgba(168, 83, 44, .38), var(--shadow);
+  box-shadow: 0 10px 24px rgba(140, 106, 63, .38), var(--shadow);
   transition: transform .14s ease, box-shadow .14s ease;
 }
-.fab:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(168, 83, 44, .44), var(--shadow); }
+.fab:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(140, 106, 63, .44), var(--shadow); }
 
 .fab-menu {
   position: fixed;
@@ -930,8 +990,8 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-title em { font-style: italic; color: var(--accent); font-weight: 500; }
 .hp-subtitle { margin: 0 0 22px; font-size: 15px; line-height: 1.6; color: var(--muted); max-width: 52ch; }
 .hp-actions { display: flex; gap: 12px; flex-wrap: wrap; }
-.hp-btn { border: 1px solid var(--accent); border-radius: var(--radius); padding: 11px 22px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .15s ease; background: transparent; color: var(--accent); }
-.hp-btn-primary { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 16px rgba(168, 83, 44, .25); }
+.hp-btn { border: 1px solid var(--accent); border-radius: var(--radius-pill); padding: 11px 22px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .15s ease; background: transparent; color: var(--accent); }
+.hp-btn-primary { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 16px rgba(140, 106, 63, .25); }
 .hp-btn-primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
 .hp-btn-ghost { background: var(--surface); }
 .hp-btn-ghost:hover { background: var(--accent-soft); }
@@ -946,7 +1006,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-stat-note { font-size: 11.5px; color: var(--muted); }
 .hp-admin-tag { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--line); padding: 4px 10px; border-radius: 999px; }
 
-.hp-tasks { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-tasks { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }
 .hp-tasks .hp-activity-head { margin-bottom: 14px; }
 .hp-tasks-count { font-size: 12px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 3px 10px; border-radius: 999px; }
 .hp-task-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
@@ -977,7 +1037,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-field { display: flex; flex-direction: column; gap: 3px; flex: 1 1 0; min-width: 0; color: var(--muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .hp-task-actions { display: flex; gap: 8px; flex: none; }
 .hp-task-btn-icon { font-size: 14px; line-height: 1; font-weight: 600; }
-.hp-task-link-btn, .hp-task-add { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 38px; border-radius: 10px; font-size: 12.5px; font-weight: 700; padding: 0 14px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.hp-task-link-btn, .hp-task-add { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 38px; border-radius: var(--radius-pill); font-size: 12.5px; font-weight: 700; padding: 0 14px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
 .hp-task-link-btn { border: 1.5px solid var(--accent); background: var(--surface); color: var(--accent); }
 .hp-task-link-btn:hover { background: var(--accent-soft); }
 .hp-task-add { border: none; background: var(--accent); color: var(--on-accent); }
@@ -1020,7 +1080,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-list-done { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
 
 /* ---- Mon portefeuille (accueil) : suivi des relations donateurs -------- */
-.hp-portfolio { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-portfolio { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }
 .hp-portfolio .hp-activity-head { margin-bottom: 14px; }
 .hp-portfolio-list { display: flex; flex-direction: column; }
 .hp-portfolio-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--line); }
@@ -1029,14 +1089,18 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-portfolio-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .hp-portfolio-dot-ok { background: #4d9a63; }
 .hp-portfolio-dot-soon { background: #d69a2d; }
-.hp-portfolio-dot-late, .hp-portfolio-dot-never { background: var(--accent); }
+/* Rouge d'alerte plutôt que l'accent bronze : ce point ne décore pas, il
+   signale un problème (retard / jamais) — au même titre que "soon" est
+   ambre. Réutiliser la couleur de marque ici la rendrait à la fois moins
+   lisible comme signal et sur-utilisée comme simple décoration. */
+.hp-portfolio-dot-late, .hp-portfolio-dot-never { background: var(--danger); }
 .hp-portfolio-info { display: flex; flex-direction: column; }
 .hp-portfolio-info strong { font-size: 14px; color: var(--ink); }
 .hp-portfolio-meta { font-size: 12px; color: var(--muted); }
 .hp-portfolio-row-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 
 /* ---- Stratégie des fêtes juives (accueil) ------------------------------ */
-.hp-holidays { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px; margin-bottom: 34px; }
+.hp-holidays { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }
 .hp-holidays .hp-activity-head { margin-bottom: 14px; }
 .hp-holiday-list { display: flex; flex-direction: column; }
 .hp-holiday-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 2px; border-bottom: 1px solid var(--line); }
@@ -1053,7 +1117,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .holiday-textarea-sms { min-height: 70px !important; max-height: 110px !important; }
 
 .hp-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 34px; }
-.hp-card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+.hp-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px; display: flex; flex-direction: column; gap: 10px; }
 .hp-card-head { display: flex; align-items: center; gap: 10px; }
 .hp-card-head svg { width: 19px; height: 19px; color: var(--accent); flex: none; }
 .hp-card-head h3 { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--ink); }
@@ -1064,7 +1128,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-card-arrow { opacity: 0; transform: translateX(-4px); transition: all .15s ease; color: var(--accent); font-size: 13px; }
 .hp-card-link:hover .hp-card-arrow { opacity: 1; transform: translateX(0); }
 
-.hp-activity { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+.hp-activity { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; }
 .hp-activity-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .hp-activity-head h2 { font-family: var(--display); font-weight: 600; font-size: 19px; margin: 0; color: var(--ink); }
 .hp-link { border: none; background: transparent; color: var(--accent); font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 4px 0; }

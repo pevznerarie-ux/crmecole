@@ -2334,12 +2334,35 @@ function render() {
   renderDrawer();
   bind();
   syncBottomNav();
+  // La fiche contact est reconstruite à chaque render() (son scroll
+  // repart donc de toute façon à 0) : on la recale sans animation sur la
+  // section visée par state.tab, pour respecter une navigation faite
+  // ailleurs (ex. "voir ses paiements") sans à-coup visuel.
+  if (state.showDetail) scrollDetailToSection(state.tab, false);
+  // Sur mobile, la fiche contact prend tout l'écran (voir styles.css) ;
+  // on masque la barre de navigation du bas et le bouton "+" flottant
+  // pendant ce temps, pour que ça se comporte comme une vraie page à part
+  // plutôt qu'un panneau qui laisse deviner le reste de l'appli dessous.
+  document.body.classList.toggle("detail-fullscreen", !!(state.showDetail && state.mobileDetailOpen));
 }
 
 /* ---------- 7. Fiche détail ------------------------------------------- */
 
+// Fiche contact : une seule page qui défile, découpée en sections, avec une
+// rangée de "pastilles" en haut qui font défiler jusqu'à la section visée
+// (scrollIntoView) plutôt que de cacher 5 sections sur 6 derrière des
+// onglets. state.tab garde son rôle (quelle section cibler) mais ne
+// contrôle plus ce qui s'affiche — tout est toujours affiché.
+const DETAIL_SECTIONS = [
+  ["Details", "Détails"],
+  ["Activité", "Activité"],
+  ["Tâches", "Tâches"],
+  ["Paiements", "Paiements"],
+  ["Categorisation", "Détails +"],
+  ["Relations", "Relations"],
+];
+
 function recordDetail(r) {
-  const tabs = ["Details", "Activité", "Tâches", "Paiements", "Categorisation", "Relations"];
   const initial = r.kind === "Structure" ? "ST" : (r.first?.[0] || r.name?.[0] || "C");
   return `<aside class="panel detail-card">
     <div class="detail-head"><div class="avatar">${escapeHtml(initial)}</div><div><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div><button class="icon-btn detail-close" type="button" data-action="close-detail" title="Fermer et voir toute la liste">✕</button></div>
@@ -2356,45 +2379,76 @@ function recordDetail(r) {
       ${action("+ Commentaire", `quick-comment:${r.id}`)}
       ${action(isInMyPortfolio(r) ? "★ Dans mon portefeuille" : "+ Ajouter à mon portefeuille", `toggle-portfolio:${r.id}`)}
     </div>
-    <div class="tabs">${tabs.map(t => `<button class="tab-btn ${state.tab === t ? "active" : ""}" data-tab="${t}">${t === "Categorisation" ? "Détails +" : t}</button>`).join("")}</div>
-    <div class="detail-body">${recordDetailBody(r)}
+    <div class="tabs detail-jumpnav">${DETAIL_SECTIONS.map(([key, label]) => `<button type="button" class="tab-btn ${state.tab === key ? "active" : ""}" data-tab="${key}">${label}</button>`).join("")}</div>
+    <div class="detail-body">${recordDetailSections(r)}
     <div class="row-actions detail-actions">${action("Modifier toute la fiche", "edit-record", "primary-btn")} ${action("Supprimer", "delete-record")}</div></div>
   </aside>`;
 }
 
-function recordDetailBody(r) {
-  if (state.tab === "Activité") {
+function detailSection(key, label, bodyHtml) {
+  return `<section class="detail-section" data-section="${key}"><h3 class="detail-section-title">${escapeHtml(label)}</h3>${bodyHtml}</section>`;
+}
+
+function recordDetailSections(r) {
+  const detailsBody = (() => {
+    const body = [["Civilité", r.civility || "-"], ["Nom", r.name], ["Email", r.email || "-"], ["Email secondaire", r.secondaryEmails || "-"], ["Téléphone", r.phone || "-"], ["Téléphone 2", r.phone2 || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Date de naissance", r.dob || "-"], ["SIREN", r.siren || "-"], ["Forme juridique", r.legal || "-"], ["Commentaire", r.comment || "-"]];
+    return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
+  })();
+  const activiteBody = (() => {
     const feed = recordLiveInteractions(r.id);
     const importedNote = r.importedInteractionsCount ? `<p class="muted-note">+ ${r.importedInteractionsCount} interaction(s) historiques importées avant le CRM.</p>` : "";
     const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une interaction", `quick-interaction:${r.id}`, "primary-btn")}</div>`;
     return `${addBtn}${importedNote}${feed.length ? `<div class="timeline">${feed.map(i => `<div class="timeline-item"><strong>${i.type === "Commentaire" ? "Commentaire" : i.type}${i.label ? " — " + escapeHtml(i.label) : ""}</strong>${i.note ? `<p>${escapeHtml(i.note)}</p>` : ""}<span class="timeline-date">${i.date} · ${escapeHtml(i.user)}</span></div>`).join("")}</div>` : emptyState("Aucune interaction ou commentaire enregistré pour l'instant.")}`;
-  }
-  if (state.tab === "Tâches") {
+  })();
+  const tachesBody = (() => {
     const recTasks = tasks.filter(t => t.recordId === r.id).sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
     const openTasks = recTasks.filter(t => t.status !== "fait");
     const doneTasks = recTasks.filter(t => t.status === "fait");
     const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une tâche", `quick-task:${r.id}`, "primary-btn")}</div>`;
     return `${addBtn}${recTasks.length ? `<div class="hp-task-list">${openTasks.map(t => hpTaskRow(t)).join("")}${doneTasks.map(t => hpTaskRow(t)).join("")}</div>` : emptyState("Aucune tâche pour cette fiche pour l'instant.")}`;
-  }
-  if (state.tab === "Paiements") {
+  })();
+  const paiementsBody = (() => {
     const feed = recordLivePayments(r.id);
     const importedNote = r.importedAmount ? `<p class="muted-note">+ ${euro(r.importedAmount)} sur ${r.importedPaymentsCount || 0} paiement(s) historiques importés avant le CRM.</p>` : "";
     // Chaque don/paiement peut être modifié (ex : passer son Statut de
     // "Promis" à "Reçu" une fois l'argent effectivement arrivé) ou supprimé, directement
     // depuis cette liste — jusqu'ici impossible une fois le paiement ajouté.
     return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
-  }
-  if (state.tab === "Categorisation") {
+  })();
+  const categorisationBody = (() => {
     const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Portefeuille", r.agent || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
     return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
-  }
-  if (state.tab === "Relations") {
+  })();
+  const relationsBody = (() => {
     const links = linkages.filter(l => l.a === r.name || l.b === r.name);
     const body = [["Rôle de foyer", r.role || "-"], ["Type de foyer", r.householdType || "-"], ["Statut parent", r.parentStatus || "-"], ["Statut enfant", r.childStatus || "-"], ["Profession", r.profession || "-"], ["École actuelle", r.school || "-"], ["Famille", r.family || "-"]];
     return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>${links.length ? `<div class="timeline">${links.map(l=>`<div class="timeline-item"><strong>${escapeHtml(l.a)} ↔ ${escapeHtml(l.b)}</strong><p>${l.type}</p></div>`).join("")}</div>` : ""}${action("Ajouter une liaison", `add-linkage:${r.id}`)}`;
-  }
-  const body = [["Civilité", r.civility || "-"], ["Nom", r.name], ["Email", r.email || "-"], ["Email secondaire", r.secondaryEmails || "-"], ["Téléphone", r.phone || "-"], ["Téléphone 2", r.phone2 || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Date de naissance", r.dob || "-"], ["SIREN", r.siren || "-"], ["Forme juridique", r.legal || "-"], ["Commentaire", r.comment || "-"]];
-  return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
+  })();
+  return [
+    detailSection("Details", "Détails", detailsBody),
+    detailSection("Activité", "Activité", activiteBody),
+    detailSection("Tâches", "Tâches", tachesBody),
+    detailSection("Paiements", "Paiements", paiementsBody),
+    detailSection("Categorisation", "Détails +", categorisationBody),
+    detailSection("Relations", "Relations", relationsBody),
+  ].join("");
+}
+
+// Fait défiler le panneau de la fiche jusqu'à la section visée. smooth=true
+// pour un clic explicite sur une pastille ; smooth=false pour le recalage
+// silencieux juste après un rendu complet (évite une animation qui rejoue
+// à chaque frappe pendant qu'une fiche est ouverte).
+function scrollDetailToSection(key, smooth) {
+  if (!key) return;
+  const card = document.querySelector(".detail-card");
+  if (!card) return;
+  // "Details" est la toute première section : viser cette section précise
+  // scrollerait juste SOUS l'en-tête (avatar/nom/KPIs/pastilles), qui
+  // disparaîtrait alors du haut de l'écran à chaque ouverture de fiche. On
+  // vise plutôt le haut de la fiche entière dans ce cas.
+  const target = key === "Details" ? card : card.querySelector(`[data-section="${key}"]`);
+  if (!target) return;
+  target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
 }
 
 /* ---------- 8. Navigation & tiroir mobile ------------------------------- */
@@ -2567,7 +2621,15 @@ function bind() {
   }));
   document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); handleAction(el.dataset.action); }));
   document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details"; render(); scrollToTop(); }));
-  document.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
+  // Les pastilles de la fiche contact ne reconstruisent plus toute la page :
+  // tout est déjà affiché (une seule page qui défile), donc un clic se
+  // contente de faire défiler jusqu'à la section et de déplacer la
+  // surbrillance — plus fluide qu'un render() complet à chaque clic.
+  document.querySelectorAll(".detail-jumpnav [data-tab]").forEach(el => el.addEventListener("click", () => {
+    state.tab = el.dataset.tab;
+    document.querySelectorAll(".detail-jumpnav .tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === state.tab));
+    scrollDetailToSection(state.tab, true);
+  }));
   document.querySelectorAll("[data-category-index]").forEach(el => {
     el.addEventListener("change", () => { renameInteractionCategory(Number(el.dataset.categoryIndex), el.value); render(); });
   });
@@ -3136,7 +3198,16 @@ function applyInlineInstallment(p, data) {
   if (paymentRemaining(p) <= 0) { p.status = "Reçu"; p.paymentDate = p.paymentDate || todayIso(); bumpReceiptIfReceived(p); }
 }
 function paymentTimelineItem(p) {
-  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${paymentPrimaryDate(p)}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
+  // Un don/adhésion a un reçu associé : on donne accès à "Télécharger"/
+  // "Régénérer" directement ici, sur la ligne, plutôt que de forcer à
+  // aller chercher la même ligne dans Paiements > Reçus (demande explicite :
+  // retrouver cette action à côté du don dans la fiche contact).
+  const hasReceipt = p.type === "Don" || p.type === "Adhésion";
+  const externe = p.receipt === "Généré ailleurs";
+  const receiptActions = !hasReceipt ? "" : externe
+    ? `<span class="muted-note">Reçu émis par l'ancien système</span>`
+    : `${p.receiptNumber ? action("Télécharger le reçu", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer le reçu", `regenerate-receipt:${p.id}`)}`;
+  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${paymentPrimaryDate(p)}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${receiptActions}${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
 }
 function openAddInstallment(id) {
   const p = payments.find(item => item.id === id);
