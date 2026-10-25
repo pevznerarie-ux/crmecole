@@ -1258,13 +1258,13 @@ function home() {
         ${hpCard("hp-icon-import", "Import", [["Importer un fichier", "import-new"], ["Exporter la vue active", "export-current"]])}
       </section>
 
-      ${recentInteractions.length ? `<section class="hp-activity">
-        <div class="hp-activity-head"><h2>Activité récente</h2><button type="button" class="hp-link" data-action="goto-interactions">Voir tout</button></div>
+      ${recentInteractions.length ? `<section class="hp-activity${panelCls("activity")}">
+        <div class="hp-activity-head"><h2>Activité récente</h2><button type="button" class="hp-link" data-action="goto-interactions">Voir tout</button>${panelToggle("activity")}</div>
         <div class="hp-timeline">${recentInteractions.map(i => hpActivityItem(i)).join("")}</div>
       </section>` : ""}
 
-      <section class="hp-activity hp-admin">
-        <div class="hp-activity-head"><h2>Vue d'ensemble</h2><span class="hp-admin-tag">Administration générale</span></div>
+      <section class="hp-activity hp-admin${panelCls("overview")}">
+        <div class="hp-activity-head"><h2>Vue d'ensemble</h2><span class="hp-admin-tag">Administration générale</span>${panelToggle("overview")}</div>
         <div class="hp-stats hp-stats-2col hp-stats-boxed">
           ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
           ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
@@ -1388,8 +1388,8 @@ function ensureHolidayReminders() {
 function hpHolidayPanel() {
   const upcoming = upcomingHolidays(3);
   if (!upcoming.length) return "";
-  return `<section class="hp-holidays">
-    <div class="hp-activity-head"><h2>Idées pour les fêtes</h2><span class="hp-tasks-count">Prochaine dans ${upcoming[0].daysLeft <= 0 ? "0 j" : `${upcoming[0].daysLeft} j`}</span></div>
+  return `<section class="hp-holidays${panelCls("holidays")}">
+    <div class="hp-activity-head"><h2>Idées pour les fêtes</h2><span class="hp-tasks-count">Prochaine dans ${upcoming[0].daysLeft <= 0 ? "0 j" : `${upcoming[0].daysLeft} j`}</span>${panelToggle("holidays")}</div>
     <div class="hp-holiday-list">
       ${upcoming.map(h => `<div class="hp-holiday-row">
         <div class="hp-holiday-main">
@@ -1493,6 +1493,15 @@ const PORTFOLIO_TONE_ORDER = { never: 0, late: 1, soon: 2, ok: 3 };
    hébraïque tombe dedans, pour penser à leur envoyer un petit message. Les
    jours hébraïques de la période sont calculés une seule fois puis indexés,
    pour rester rapide même avec plusieurs milliers de fiches. */
+// Seuls les donateurs comptent ici (pas les élèves) : fiche avec au moins
+// un don (historique importé ou enregistré), étiquetée "donateur", ou
+// suivie dans le portefeuille de quelqu'un.
+function isDonor(r) {
+  return recordTotalAmount(r) > 0 || (r.tags || []).some(t => /donat/i.test(t)) || !!normalizeAgentCode(r.agent);
+}
+function isBirthdayTarget(r) {
+  return state.birthdayScope === "mine" ? isInMyPortfolio(r) : isDonor(r);
+}
 function birthdaysInRange(fromIso, toIso) {
   const days = [];
   for (let iso = fromIso; iso <= toIso; iso = addDaysIso(iso, 1)) days.push({ iso, h: hebrewParts(iso) });
@@ -1500,7 +1509,7 @@ function birthdaysInRange(fromIso, toIso) {
   const hebYears = [...new Set(days.map(d => d.h.year))];
   const out = [];
   records.forEach(r => {
-    if (r.kind === "Structure") return;
+    if (r.kind === "Structure" || !isBirthdayTarget(r)) return;
     const iso = parseDob(r.dob);
     if (!iso) return;
     const [, mo, dd] = iso.split("-").map(Number);
@@ -1524,6 +1533,10 @@ function birthdaysInRange(fromIso, toIso) {
   });
   return out.sort((a, b) => a.iso.localeCompare(b.iso) || a.r.name.localeCompare(b.r.name));
 }
+// Portefeuille d'abord (même jour : les miens en tête), pour l'encart d'accueil.
+function birthdaysMineFirst(list) {
+  return [...list].sort((a, b) => (isInMyPortfolio(b.r) - isInMyPortfolio(a.r)) || a.iso.localeCompare(b.iso));
+}
 function birthdayRow(item, today) {
   const { r, iso, kind, age, hebLabel } = item;
   const d = utcNoon(iso);
@@ -1533,7 +1546,7 @@ function birthdayRow(item, today) {
   return `<div class="bday-row${past ? " bday-row-past" : ""}${iso === today ? " bday-row-today" : ""}">
     <div class="bday-date"><strong>${d.getUTCDate()}</strong><span>${escapeHtml(when)}</span></div>
     <button type="button" class="bday-main" data-action="open-record:${r.id}:Details">
-      <strong>${escapeHtml(r.name)}</strong>
+      <strong>${escapeHtml(r.name)}${isInMyPortfolio(r) ? ` <span class="bday-mine" title="Dans mon portefeuille">★ Mon portefeuille</span>` : ""}</strong>
       <span class="bday-kind bday-kind-${kind}">${escapeHtml(what)}</span>
     </button>
     <div class="bday-actions">${action("Message", `quick-interaction:${r.id}`)}${action("+ Tâche", `quick-task:${r.id}`)}</div>
@@ -1549,31 +1562,46 @@ function birthdaysView() {
   const ym = state.birthdayMonth || today.slice(0, 7);
   const [from, to] = monthBounds(ym);
   const list = birthdaysInRange(from, to);
-  const withDob = records.filter(r => r.kind !== "Structure" && parseDob(r.dob)).length;
+  const withDob = records.filter(r => r.kind !== "Structure" && isBirthdayTarget(r) && parseDob(r.dob)).length;
+  const scope = state.birthdayScope === "mine" ? "mine" : "donors";
   const title = utcNoon(from).toLocaleDateString("fr-FR", { month: "long", year: "numeric", timeZone: "UTC" });
   return `<section class="panel pad">
     <div class="toolbar clean">
       <div>
         <span class="eyebrow">Anniversaires</span>
         <h2 class="bday-title">${escapeHtml(title.charAt(0).toUpperCase() + title.slice(1))}</h2>
-        <p class="muted-note">${list.length} anniversaire${list.length > 1 ? "s" : ""} ce mois-ci (civils et hébraïques) · ${withDob} fiche${withDob > 1 ? "s" : ""} avec une date de naissance.</p>
+        <p class="muted-note">${list.length} anniversaire${list.length > 1 ? "s" : ""} ce mois-ci (civils et hébraïques) · ${withDob} ${scope === "mine" ? "contact(s) de mon portefeuille" : "donateur(s)"} avec une date de naissance.</p>
+        <div class="segmented bday-scope">
+          <button type="button" class="${scope === "mine" ? "active" : ""}" data-action="bday-scope:mine">Mon portefeuille</button>
+          <button type="button" class="${scope === "donors" ? "active" : ""}" data-action="bday-scope:donors">Tous les donateurs</button>
+        </div>
       </div>
-      <div class="row-actions">${action("‹ Mois précédent", "bday-month:-1")}${ym !== today.slice(0, 7) ? action("Ce mois-ci", "bday-month:0") : ""}${action("Mois suivant ›", "bday-month:1")}</div>
+      <div class="row-actions bday-nav"><button type="button" data-action="bday-month:-1" title="Mois précédent" aria-label="Mois précédent">‹</button>${ym !== today.slice(0, 7) ? action("Ce mois-ci", "bday-month:0") : ""}<button type="button" data-action="bday-month:1" title="Mois suivant" aria-label="Mois suivant">›</button></div>
     </div>
     ${list.length ? `<div class="bday-list">${list.map(x => birthdayRow(x, today)).join("")}</div>`
-      : emptyState(withDob ? "Aucun anniversaire ce mois-ci." : "Aucune date de naissance renseignée pour l'instant. Ajoutez-la depuis la fiche d'un contact (Modifier toute la fiche).")}
+      : emptyState(withDob ? "Aucun anniversaire ce mois-ci." : `Aucune date de naissance renseignée pour ${scope === "mine" ? "les contacts de votre portefeuille" : "les donateurs"} pour l'instant. Ajoutez-la depuis la fiche (case « Date de naissance »).`)}
   </section>`;
 }
 function hpBirthdaysPanel() {
   const today = todayIso();
-  const list = birthdaysInRange(today, addDaysIso(today, 30));
+  const list = birthdaysMineFirst(birthdaysInRange(today, addDaysIso(today, 30)));
   if (!list.length) return "";
   const shown = list.slice(0, 6);
-  return `<section class="hp-portfolio hp-birthdays">
-    <div class="hp-activity-head"><h2>Anniversaires à venir</h2><span class="hp-tasks-count">${list.length} sur 30 jours</span></div>
+  return `<section class="hp-portfolio hp-birthdays${panelCls("birthdays")}">
+    <div class="hp-activity-head"><h2>Anniversaires à venir</h2><span class="hp-tasks-count">${list.length} sur 30 jours</span>${panelToggle("birthdays")}</div>
     <div class="bday-list">${shown.map(x => birthdayRow(x, today)).join("")}</div>
     <button type="button" class="hp-link" data-action="goto-birthdays">Voir tous les anniversaires du mois</button>
   </section>`;
+}
+
+// Blocs de l'accueil repliables : chevron dans l'en-tête de chaque bloc,
+// état mémorisé sur cet appareil (simple confort d'affichage).
+const PANELS_KEY = "crm-collapsed-panels";
+let collapsedPanels = (() => { try { return JSON.parse(localStorage.getItem(PANELS_KEY) || "[]"); } catch { return []; } })();
+function panelCls(key) { return collapsedPanels.includes(key) ? " hp-collapsed" : ""; }
+function panelToggle(key) {
+  const closed = collapsedPanels.includes(key);
+  return `<button type="button" class="hp-panel-toggle" data-action="toggle-panel:${key}" aria-expanded="${!closed}" title="${closed ? "Déplier" : "Replier"}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>`;
 }
 
 function hpPortfolioPanel() {
@@ -1584,8 +1612,8 @@ function hpPortfolioPanel() {
     .sort((a, b) => PORTFOLIO_TONE_ORDER[a.tone] - PORTFOLIO_TONE_ORDER[b.tone] || (b.days ?? 99999) - (a.days ?? 99999));
   const overdue = list.filter(x => x.tone === "never" || x.tone === "late").length;
   const shown = list.slice(0, 8);
-  return `<section class="hp-portfolio">
-    <div class="hp-activity-head"><h2>Mon portefeuille</h2><span class="hp-tasks-count">${list.length ? (overdue ? `${overdue} à recontacter` : "Tout est à jour") : "Aucun contact suivi"}</span></div>
+  return `<section class="hp-portfolio${panelCls("portfolio")}">
+    <div class="hp-activity-head"><h2>Mon portefeuille</h2><span class="hp-tasks-count">${list.length ? (overdue ? `${overdue} à recontacter` : "Tout est à jour") : "Aucun contact suivi"}</span>${panelToggle("portfolio")}</div>
     ${list.length ? `<button type="button" class="hp-link" data-action="goto-portfolio">Voir tout mon portefeuille</button>` : ""}
     ${list.length ? `<div class="hp-portfolio-list">${shown.map(hpPortfolioRow).join("")}</div>${list.length > shown.length ? `<p class="muted-note">+ ${list.length - shown.length} autre(s) contact(s) dans le portefeuille.</p>` : ""}`
       : `<p class="muted-note">Ajoutez les donateurs que vous suivez personnellement pour ne plus jamais en perdre un — l'objectif est un vrai contact au moins une fois par mois.</p>`}
@@ -1768,8 +1796,8 @@ function hpTasksPanel() {
   const shownDone = done.slice(0, 15);
   const me = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
   const showDone = !!state.showDoneTasks;
-  return `<section class="hp-tasks">
-    <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span></div>
+  return `<section class="hp-tasks${panelCls("tasks")}">
+    <div class="hp-activity-head"><h2>Tâches</h2><span class="hp-tasks-count">${open.length ? `${open.length} en cours` : "Tout est fait"}</span>${panelToggle("tasks")}</div>
     <form class="hp-task-form" id="hpTaskForm" autocomplete="off">
       <div class="hp-task-input-wrap">
         <input type="text" name="title" id="hpTaskTitle" placeholder="Ajouter une tâche… ex. « Contacter Dupont »" maxlength="140" required>
@@ -3162,6 +3190,14 @@ function handleAction(key) {
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
   if (key.startsWith("quick-task:")) return openQuickForRecord(key.split(":")[1], "task");
   if (key.startsWith("add-payment:")) return openModal("payment", { type: key.split(":")[1] || "Don" });
+  if (key.startsWith("toggle-panel:")) {
+    const k = key.split(":")[1];
+    collapsedPanels = collapsedPanels.includes(k) ? collapsedPanels.filter(x => x !== k) : [...collapsedPanels, k];
+    try { localStorage.setItem(PANELS_KEY, JSON.stringify(collapsedPanels)); } catch { /* stockage indisponible */ }
+    render();
+    return;
+  }
+  if (key.startsWith("bday-scope:")) { state.birthdayScope = key.split(":")[1]; render(); return; }
   if (key.startsWith("bday-month:")) {
     const step = Number(key.split(":")[1]);
     const cur = state.birthdayMonth || todayIso().slice(0, 7);
