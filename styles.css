@@ -113,7 +113,15 @@
 }
 
 * { box-sizing: border-box; }
+/* La police n'a pas de vraie italique chargée : sans ça le navigateur
+   penche artificiellement les lettres (date de l'accueil, notes...), ce qui
+   rend mal. Le texte "italique" reste donc droit. */
+:root { font-synthesis: none; }
 html { background: var(--bg); transition: background .15s ease; }
+/* Au démarrage, rien n'est affiché tant que les données ne sont pas
+   chargées (bootApp retire .booting) : avant, on voyait un moment un
+   bandeau "Accueil" vide avant le vrai tableau de bord. */
+body.booting .app-shell, body.booting .bottom-nav, body.booting .fab { visibility: hidden; }
 body { margin: 0; color: var(--ink); background: var(--bg); transition: background .15s ease, color .15s ease; }
 button, input, select, textarea { font: inherit; }
 h1, h2, h3, p { margin: 0; }
@@ -450,6 +458,11 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
    que le débordement déjà corrigé ailleurs, donc même correctif ici et sur
    les grilles de formulaire équivalentes (modales Ajouter/Modifier...). */
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-width: 0; }
+.field-edit { display: block; width: 100%; min-height: 0; text-align: left; cursor: pointer; font: inherit; color: inherit; transition: border-color .15s ease, background .15s ease; }
+.field-edit:hover { border-color: var(--accent); background: var(--surface); }
+.field-empty strong { color: var(--accent); font-weight: 600; }
+.field-hint { display: block; margin-top: 6px; font-style: normal; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.dob-preview { display: block; margin-top: 6px; font-size: 12.5px; font-weight: 500; color: var(--accent); text-transform: none; letter-spacing: 0; }
 .field { min-width: 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .field span { display: block; margin-bottom: 5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 10px; font-weight: 700; }
 .field strong { display: block; overflow-wrap: anywhere; font-size: 13px; line-height: 1.4; font-weight: 600; }
@@ -490,7 +503,7 @@ tr[data-action]:focus-visible, tr[data-record]:focus-visible { outline: 2px soli
    supprimer est masqué (app.js bloque aussi ces actions par sécurité). */
 body.read-only [data-action^="add-"],
 body.read-only [data-action^="delete-"],
-body.read-only [data-action^="edit-"],
+body.read-only [data-action^="edit-"]:not(.field-edit),
 body.read-only [data-action^="quick-"],
 body.read-only [data-action^="dedupe-delete"],
 body.read-only [data-action^="dedupe-merge"],
@@ -504,6 +517,8 @@ body.read-only [data-action="import-new"],
 body.read-only [data-action="save-segment"],
 body.read-only #newRecordBtn, body.read-only #importBtn, body.read-only #fabAdd, body.read-only .fab,
 body.read-only .hp-task-form, body.read-only .detail-actions, body.read-only .quick-actions { display: none !important; }
+body.read-only .field-edit { pointer-events: none; }
+body.read-only .field-empty strong { visibility: hidden; }
 /* z-index 19 (et non 15 comme avant) : passe au-dessus du bouton flottant "+"
    (.fab, z-index 18) et de son menu/scrim, qui sinon restaient visibles et
    cliquables par-dessus le bas du tiroir sur mobile — masquant par exemple le
@@ -570,6 +585,11 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
     box-shadow: var(--shadow);
   }
   .sidebar.open { transform: translateX(0); }
+  /* Menu ouvert : il passe AU-DESSUS de la barre de navigation du bas (et
+     son voile aussi), au lieu d'être coupé par elle — le bas du menu
+     (profil, mode sombre, déconnexion) restait caché derrière. */
+  .sidebar { z-index: 23; padding-top: calc(20px + env(safe-area-inset-top, 0px)); padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .nav-scrim { z-index: 22; }
   nav { grid-template-columns: 1fr; gap: 2px; }
   .nav-group { padding-bottom: 2px; }
   .workspace-hero { grid-template-columns: 1fr; align-items: start; }
@@ -997,8 +1017,10 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-date { font-size: 12.5px; color: var(--muted); font-style: italic; font-family: var(--display); }
 .hp-hero { max-width: 760px; margin-bottom: 34px; }
 .hp-kicker { margin: 0 0 10px; font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--accent); }
-.hp-title { font-family: var(--display); font-weight: 600; font-size: clamp(40px, 6.4vw, 64px); line-height: 1.02; letter-spacing: -.015em; margin: 0 0 14px; color: var(--ink); }
-.hp-title em { font-style: italic; color: var(--accent); font-weight: 500; }
+/* Pas d'italique : la police n'en a pas de vraie, le navigateur penchait
+   donc artificiellement le prénom, d'où le rendu disgracieux. */
+.hp-title { font-family: var(--display); font-weight: 700; font-size: clamp(32px, 5vw, 50px); line-height: 1.08; letter-spacing: -.03em; margin: 0 0 12px; color: var(--ink); }
+.hp-title em { font-style: normal; color: var(--accent); }
 .hp-subtitle { margin: 0 0 22px; font-size: 15px; line-height: 1.6; color: var(--muted); max-width: 52ch; }
 .hp-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 .hp-btn { border: 1px solid var(--accent); border-radius: var(--radius-pill); padding: 11px 22px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .15s ease; background: transparent; color: var(--accent); }
@@ -1103,6 +1125,30 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-task-row-done { opacity: .7; }
 .hp-tasks-done-toggle { margin-top: 10px; }
 .hp-task-list-done { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 4px; }
+
+/* ---- Anniversaires (page dédiée + encart de l'accueil) ---------------- */
+.bday-title { font-size: 24px; }
+.bday-list { display: flex; flex-direction: column; margin-top: 8px; }
+.bday-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.bday-row:last-child { border-bottom: none; }
+.bday-row-past { opacity: .5; }
+.bday-date { flex: none; width: 48px; height: 52px; border-radius: 12px; background: var(--surface-alt); display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.bday-date strong { font-size: 19px; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.bday-date span { margin-top: 3px; font-size: 10.5px; font-weight: 600; color: var(--muted); text-transform: capitalize; }
+.bday-row-today .bday-date { background: var(--accent); }
+.bday-row-today .bday-date strong, .bday-row-today .bday-date span { color: var(--on-accent); }
+.bday-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 0; border: none; border-radius: 0; background: none; text-align: left; }
+.bday-main:hover { background: none; }
+.bday-main strong { font-size: 15px; color: var(--ink); font-weight: 600; }
+.bday-kind { font-size: 13px; color: var(--muted); font-weight: 500; }
+.bday-kind-hebrew { color: var(--accent); }
+.bday-actions { display: flex; gap: 6px; flex: none; }
+.bday-actions button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+@media (max-width: 720px) {
+  .bday-row { display: grid; grid-template-columns: 48px minmax(0, 1fr); column-gap: 14px; row-gap: 10px; }
+  .bday-actions { grid-column: 2; }
+  .bday-actions button { flex: 1; }
+}
 
 /* ---- Mon portefeuille (accueil) : suivi des relations donateurs -------- */
 .hp-portfolio { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }

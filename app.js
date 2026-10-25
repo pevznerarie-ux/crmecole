@@ -493,7 +493,7 @@ const apps = [
 const navTree = [
   ["home", "ACCUEIL", []],
   ["stats", "STATS", ["Vue d'ensemble"]],
-  ["crm", "CONTACTS", ["Contacts", "Structures", "Interactions", "Segments", "Groupes", "Liaisons", "Portefeuille"]],
+  ["crm", "CONTACTS", ["Contacts", "Structures", "Interactions", "Segments", "Groupes", "Liaisons", "Portefeuille", "Anniversaires"]],
   ["pay", "PAIEMENTS", ["Tous les paiements", "Dons", "Adhésions", "Billetterie", "Reçus"]],
   ["imports", "IMPORTS", []],
   ["apps", "APPLIS", ["Toutes les applis"]],
@@ -804,6 +804,27 @@ function action(label, key, cls = "") {
 }
 function field(label, name, value = "", type = "text", extra = "") {
   return `<label>${label}<input name="${name}" type="${type}" value="${escapeHtml(value)}" ${extra}></label>`;
+}
+// Date de naissance civile (sélecteur de date) + "après le coucher du
+// soleil", avec la date hébraïque calculée en direct sous le champ.
+function dobFields(r) {
+  const iso = parseDob(r.dob);
+  const preview = iso ? recordHebrewBirth({ dob: iso, dobAfterSunset: r.dobAfterSunset })?.label : "";
+  return `<label>Date de naissance (civile)<input name="dob" type="date" value="${escapeHtml(iso)}" data-dob-input><small class="dob-preview" data-dob-preview>${preview ? `Date hébraïque : ${escapeHtml(preview)}` : "La date hébraïque sera calculée automatiquement"}</small></label>
+    ${selectField("Né(e) après le coucher du soleil ?", "dobAfterSunset", ["Non", "Oui"], r.dobAfterSunset ? "Oui" : "Non")}`;
+}
+function wireDobPreview(root) {
+  const input = root.querySelector("[data-dob-input]");
+  if (!input) return;
+  const sunset = root.querySelector('[name="dobAfterSunset"]');
+  const out = root.querySelector("[data-dob-preview]");
+  const update = () => {
+    const heb = input.value ? recordHebrewBirth({ dob: input.value, dobAfterSunset: sunset?.value === "Oui" }) : null;
+    out.textContent = heb ? `Date hébraïque : ${heb.label}` : "La date hébraïque sera calculée automatiquement";
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("change", update);
+  sunset?.addEventListener("change", update);
 }
 function textareaField(label, name, value = "", extra = "") {
   return `<label class="span-2">${label}<textarea name="${name}" ${extra}>${escapeHtml(value)}</textarea></label>`;
@@ -1224,6 +1245,8 @@ function home() {
 
       ${hpTasksPanel()}
 
+      ${hpBirthdaysPanel()}
+
       ${hpPortfolioPanel()}
 
       ${hpHolidayPanel()}
@@ -1465,6 +1488,94 @@ function portfolioTone(days) {
   return "ok";
 }
 const PORTFOLIO_TONE_ORDER = { never: 0, late: 1, soon: 2, ok: 3 };
+/* ---- Anniversaires (civils et hébraïques) -------------------------------
+   Liste, pour une période donnée, les contacts dont l'anniversaire civil ou
+   hébraïque tombe dedans, pour penser à leur envoyer un petit message. Les
+   jours hébraïques de la période sont calculés une seule fois puis indexés,
+   pour rester rapide même avec plusieurs milliers de fiches. */
+function birthdaysInRange(fromIso, toIso) {
+  const days = [];
+  for (let iso = fromIso; iso <= toIso; iso = addDaysIso(iso, 1)) days.push({ iso, h: hebrewParts(iso) });
+  const byHeb = new Map(days.map(d => [`${d.h.year}|${d.h.month}|${d.h.day}`, d.iso]));
+  const hebYears = [...new Set(days.map(d => d.h.year))];
+  const out = [];
+  records.forEach(r => {
+    if (r.kind === "Structure") return;
+    const iso = parseDob(r.dob);
+    if (!iso) return;
+    const [, mo, dd] = iso.split("-").map(Number);
+    for (let y = +fromIso.slice(0, 4); y <= +toIso.slice(0, 4); y += 1) {
+      const civil = isoFromParts(y, mo, dd) || isoFromParts(y, mo, dd - 1);
+      if (civil && civil >= fromIso && civil <= toIso) out.push({ r, iso: civil, kind: "civil", age: y - +iso.slice(0, 4) });
+    }
+    const b = recordHebrewBirth(r);
+    hebYears.forEach(hy => {
+      let month = b.month;
+      if (month === "Adar" && hebrewYearIsLeap(hy)) month = "Adar II";
+      if ((month === "Adar I" || month === "Adar II") && !hebrewYearIsLeap(hy)) month = "Adar";
+      let when = byHeb.get(`${hy}|${month}|${b.day}`);
+      if (!when && b.day === 30) {
+        const d29 = byHeb.get(`${hy}|${month}|29`);
+        if (d29 && hebrewParts(addDaysIso(d29, 1)).month !== month) when = addDaysIso(d29, 1);
+        if (when && when > toIso) when = "";
+      }
+      if (when) out.push({ r, iso: when, kind: "hebrew", age: hy - b.year, hebLabel: `${b.day} ${HEB_FR.formatToParts(utcNoon(when)).find(p => p.type === "month")?.value || ""}` });
+    });
+  });
+  return out.sort((a, b) => a.iso.localeCompare(b.iso) || a.r.name.localeCompare(b.r.name));
+}
+function birthdayRow(item, today) {
+  const { r, iso, kind, age, hebLabel } = item;
+  const d = utcNoon(iso);
+  const past = iso < today;
+  const when = iso === today ? "Auj." : d.toLocaleDateString("fr-FR", { weekday: "short", timeZone: "UTC" });
+  const what = kind === "civil" ? `Anniversaire civil${age > 0 ? ` · ${age} ans` : ""}` : `Anniversaire hébraïque · ${hebLabel}${age > 0 ? ` · ${age} ans` : ""}`;
+  return `<div class="bday-row${past ? " bday-row-past" : ""}${iso === today ? " bday-row-today" : ""}">
+    <div class="bday-date"><strong>${d.getUTCDate()}</strong><span>${escapeHtml(when)}</span></div>
+    <button type="button" class="bday-main" data-action="open-record:${r.id}:Details">
+      <strong>${escapeHtml(r.name)}</strong>
+      <span class="bday-kind bday-kind-${kind}">${escapeHtml(what)}</span>
+    </button>
+    <div class="bday-actions">${action("Message", `quick-interaction:${r.id}`)}${action("+ Tâche", `quick-task:${r.id}`)}</div>
+  </div>`;
+}
+function monthBounds(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return [`${ym}-01`, `${ym}-${String(last).padStart(2, "0")}`];
+}
+function birthdaysView() {
+  const today = todayIso();
+  const ym = state.birthdayMonth || today.slice(0, 7);
+  const [from, to] = monthBounds(ym);
+  const list = birthdaysInRange(from, to);
+  const withDob = records.filter(r => r.kind !== "Structure" && parseDob(r.dob)).length;
+  const title = utcNoon(from).toLocaleDateString("fr-FR", { month: "long", year: "numeric", timeZone: "UTC" });
+  return `<section class="panel pad">
+    <div class="toolbar clean">
+      <div>
+        <span class="eyebrow">Anniversaires</span>
+        <h2 class="bday-title">${escapeHtml(title.charAt(0).toUpperCase() + title.slice(1))}</h2>
+        <p class="muted-note">${list.length} anniversaire${list.length > 1 ? "s" : ""} ce mois-ci (civils et hébraïques) · ${withDob} fiche${withDob > 1 ? "s" : ""} avec une date de naissance.</p>
+      </div>
+      <div class="row-actions">${action("‹ Mois précédent", "bday-month:-1")}${ym !== today.slice(0, 7) ? action("Ce mois-ci", "bday-month:0") : ""}${action("Mois suivant ›", "bday-month:1")}</div>
+    </div>
+    ${list.length ? `<div class="bday-list">${list.map(x => birthdayRow(x, today)).join("")}</div>`
+      : emptyState(withDob ? "Aucun anniversaire ce mois-ci." : "Aucune date de naissance renseignée pour l'instant. Ajoutez-la depuis la fiche d'un contact (Modifier toute la fiche).")}
+  </section>`;
+}
+function hpBirthdaysPanel() {
+  const today = todayIso();
+  const list = birthdaysInRange(today, addDaysIso(today, 30));
+  if (!list.length) return "";
+  const shown = list.slice(0, 6);
+  return `<section class="hp-portfolio hp-birthdays">
+    <div class="hp-activity-head"><h2>Anniversaires à venir</h2><span class="hp-tasks-count">${list.length} sur 30 jours</span></div>
+    <div class="bday-list">${shown.map(x => birthdayRow(x, today)).join("")}</div>
+    <button type="button" class="hp-link" data-action="goto-birthdays">Voir tous les anniversaires du mois</button>
+  </section>`;
+}
+
 function hpPortfolioPanel() {
   const mine = myAgentCode();
   if (!mine) return "";
@@ -1540,6 +1651,98 @@ function formatFrDate(iso) {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
 }
+/* ---- Dates de naissance : civil -> hébraïque ----------------------------
+   La conversion utilise le calendrier hébraïque intégré au navigateur
+   (Intl, calendrier "hebrew"), sans bibliothèque externe. Une naissance
+   après le coucher du soleil compte pour le jour hébraïque suivant
+   (r.dobAfterSunset). Les dates importées arrivent sous plusieurs formats
+   (JJ/MM/AAAA, AAAA-MM-JJ...) : parseDob les ramène toutes en AAAA-MM-JJ. */
+function parseDob(value) {
+  const v = String(value || "").trim();
+  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return isoFromParts(+m[1], +m[2], +m[3]);
+  m = v.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);
+  if (m) {
+    let y = +m[3];
+    if (y < 100) y += y > (new Date().getFullYear() % 100) ? 1900 : 2000;
+    return isoFromParts(y, +m[2], +m[1]);
+  }
+  return "";
+}
+function isoFromParts(y, mo, d) {
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return "";
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+const HEB_FR = new Intl.DateTimeFormat("fr-FR-u-ca-hebrew", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+const HEB_KEY = new Intl.DateTimeFormat("en-u-ca-hebrew", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+function utcNoon(iso) { return new Date(`${iso}T12:00:00Z`); }
+function addDaysIso(iso, n) { const d = utcNoon(iso); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+// Jour hébraïque d'une date civile : { day, month (clé anglaise : "Adar I"...), year, label (français) }
+function hebrewParts(iso) {
+  const parts = Object.fromEntries(HEB_KEY.formatToParts(utcNoon(iso)).map(p => [p.type, p.value]));
+  const label = HEB_FR.formatToParts(utcNoon(iso)).filter(p => p.type === "day" || p.type === "month" || p.type === "year").map(p => p.value).join(" ");
+  return { day: +parts.day, month: parts.month, year: +parts.year, label };
+}
+function recordHebrewBirth(r) {
+  const iso = parseDob(r?.dob);
+  if (!iso) return null;
+  return hebrewParts(r.dobAfterSunset ? addDaysIso(iso, 1) : iso);
+}
+function hebrewYearIsLeap(year) { return ((7 * year + 1) % 19) < 7; }
+// Prochaine date civile (>= fromIso) où tombe l'anniversaire hébraïque.
+// Règles usuelles : né en Adar (année simple) -> Adar II les années
+// embolismiques ; né en Adar I/II -> Adar les années simples ; un 30 qui
+// n'existe pas cette année-là (Hechvan, Kislev, Adar I) -> le 1er du mois
+// suivant, c'est-à-dire le lendemain du 29.
+function nextHebrewBirthday(r, fromIso) {
+  const birth = recordHebrewBirth(r);
+  if (!birth) return "";
+  const start = hebrewParts(fromIso);
+  for (const hy of [start.year, start.year + 1]) {
+    let month = birth.month;
+    if (month === "Adar" && hebrewYearIsLeap(hy)) month = "Adar II";
+    if ((month === "Adar I" || month === "Adar II") && !hebrewYearIsLeap(hy)) month = "Adar";
+    // approximation de départ : même date civile que fromIso, puis on avance
+    for (let i = 0, iso = fromIso; i < 400; i += 1, iso = addDaysIso(iso, 1)) {
+      const h = hebrewParts(iso);
+      if (h.year > hy) break;
+      if (h.year !== hy || h.month !== month) continue;
+      if (h.day === birth.day) return iso;
+      if (birth.day === 30 && h.day === 29) {
+        const next = hebrewParts(addDaysIso(iso, 1));
+        if (next.month !== month) return addDaysIso(iso, 1);
+      }
+    }
+  }
+  return "";
+}
+function nextCivilBirthday(r, fromIso) {
+  const iso = parseDob(r?.dob);
+  if (!iso) return "";
+  const [, mo, d] = iso.split("-").map(Number);
+  const fromYear = +fromIso.slice(0, 4);
+  for (const y of [fromYear, fromYear + 1]) {
+    // 29 février : fêté le 28 les années non bissextiles
+    const candidate = isoFromParts(y, mo, d) || isoFromParts(y, mo, d - 1);
+    if (candidate >= fromIso) return candidate;
+  }
+  return "";
+}
+function ageOn(r, iso) {
+  const b = parseDob(r?.dob);
+  if (!b) return null;
+  let age = +iso.slice(0, 4) - +b.slice(0, 4);
+  if (iso.slice(5) < b.slice(5)) age -= 1;
+  return age;
+}
+function dobLabel(r) {
+  const iso = parseDob(r?.dob);
+  if (!iso) return r?.dob || "-";
+  const heb = recordHebrewBirth(r);
+  return `${formatFrDateFull(iso)}${heb ? ` · ${heb.label}${r.dobAfterSunset ? " (après le coucher du soleil)" : ""}` : ""}`;
+}
+
 // Version longue (JJ/MM/AAAA) de formatFrDate, pour les endroits qui
 // affichaient déjà les dates au format complet (fiches paiement, journal
 // comptable) plutôt qu'au format court "23 sept." des tâches.
@@ -1967,6 +2170,7 @@ function crm() {
   if (state.section === "Interactions") return interactionsView();
   if (state.section === "Liaisons") return linkagesView();
   if (state.section === "Portefeuille") return portfolioView();
+  if (state.section === "Anniversaires") return birthdaysView();
   return recordsView(state.section === "Structures" ? "Structure" : state.section === "Contacts" ? "Contact" : null);
 }
 
@@ -2459,14 +2663,40 @@ function recordDetail(r) {
   </aside>`;
 }
 
+// Cases de la fiche : chacune est un bouton qui ouvre la modification de la
+// fiche directement sur le bon champ (avant, on ne pouvait rien toucher
+// depuis "Détails +" ou "Relations" sans passer par "Modifier toute la
+// fiche" tout en bas). Case vide : "Ajouter" au lieu d'un simple tiret.
+function fieldGrid(rows) {
+  return `<div class="field-grid">${rows.map(([label, value, key, hint]) => {
+    const empty = !String(value ?? "").trim();
+    return `<button type="button" class="field field-edit${empty ? " field-empty" : ""}" data-action="edit-record:${key}" title="Modifier">
+      <span>${escapeHtml(label)}</span>
+      <strong>${empty ? "+ Ajouter" : escapeHtml(value)}</strong>${hint ? `<em class="field-hint">${escapeHtml(hint)}</em>` : ""}
+    </button>`;
+  }).join("")}</div>`;
+}
+function birthdayHint(r) {
+  if (!parseDob(r.dob)) return "";
+  const today = todayIso();
+  const civil = nextCivilBirthday(r, today);
+  const heb = nextHebrewBirthday(r, today);
+  const fmt = iso => iso === today ? "aujourd'hui" : utcNoon(iso).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+  return [civil && `Prochain anniversaire civil : ${fmt(civil)}`, heb && `hébraïque : ${fmt(heb)}`].filter(Boolean).join(" · ");
+}
+
 function detailSection(key, label, bodyHtml) {
   return `<section class="detail-section" data-section="${key}"><h3 class="detail-section-title">${escapeHtml(label)}</h3>${bodyHtml}</section>`;
 }
 
 function recordDetailSections(r) {
   const detailsBody = (() => {
-    const body = [["Civilité", r.civility || "-"], ["Nom", r.name], ["Email", r.email || "-"], ["Email secondaire", r.secondaryEmails || "-"], ["Téléphone", r.phone || "-"], ["Téléphone 2", r.phone2 || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Date de naissance", r.dob || "-"], ["SIREN", r.siren || "-"], ["Forme juridique", r.legal || "-"], ["Commentaire", r.comment || "-"]];
-    return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
+    const isStruct = r.kind === "Structure";
+    const body = isStruct
+      ? [["Nom", r.name, "name"], ["Email", r.email, "email"], ["Téléphone", r.phone, "phone"], ["Adresse", r.address, "address"], ["SIREN", r.siren, "siren"], ["Forme juridique", r.legal, "legal"]]
+      : [["Civilité", r.civility, "civility"], ["Nom", r.name, "last"], ["Email", r.email, "email"], ["Email secondaire", r.secondaryEmails, "secondaryEmails"], ["Téléphone", r.phone, "phone"], ["Téléphone 2", r.phone2, "phone2"], ["Adresse", r.address, "address"], ["Ville", r.city, "city"], ["Date de naissance", parseDob(r.dob) || r.dob ? dobLabel(r) : "", "dob", birthdayHint(r)]];
+    body.push(["Commentaire", r.comment, "comment"]);
+    return fieldGrid(body);
   })();
   const activiteBody = (() => {
     const feed = recordLiveInteractions(r.id);
@@ -2490,13 +2720,13 @@ function recordDetailSections(r) {
     return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
   })();
   const categorisationBody = (() => {
-    const body = [["Étiquettes", (r.tags||[]).join(", ") || "-"], ["Segments", (r.segments||[]).join(", ") || "-"], ["Groupes", (r.groups||[]).join(", ") || "-"], ["Portefeuille", r.agent || "-"], ["Source", r.source || "-"], ["Adresse", r.address || "-"], ["Ville", r.city || "-"], ["Code postal", r.zip || "-"], ["Pays", r.country || "-"]];
-    return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>`;
+    const body = [["Étiquettes", (r.tags||[]).join(", "), "tags"], ["Segments", (r.segments||[]).join(", "), "segments"], ["Groupes", (r.groups||[]).join(", "), "groups"], ["Portefeuille", r.agent, "agent"], ["Source", r.source, "source"], ["Adresse", r.address, "address"], ["Ville", r.city, "city"], ["Code postal", r.zip, "zip"], ["Pays", r.country, "country"]];
+    return fieldGrid(body);
   })();
   const relationsBody = (() => {
     const links = linkages.filter(l => l.a === r.name || l.b === r.name);
-    const body = [["Rôle de foyer", r.role || "-"], ["Type de foyer", r.householdType || "-"], ["Statut parent", r.parentStatus || "-"], ["Statut enfant", r.childStatus || "-"], ["Profession", r.profession || "-"], ["École actuelle", r.school || "-"], ["Famille", r.family || "-"]];
-    return `<div class="field-grid">${body.map(([k,v]) => `<div class="field"><span>${k}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}</div>${links.length ? `<div class="timeline">${links.map(l=>`<div class="timeline-item"><strong>${escapeHtml(l.a)} ↔ ${escapeHtml(l.b)}</strong><p>${l.type}</p></div>`).join("")}</div>` : ""}${action("Ajouter une liaison", `add-linkage:${r.id}`)}`;
+    const body = [["Rôle de foyer", r.role, "role"], ["Type de foyer", r.householdType, "householdType"], ["Statut parent", r.parentStatus, "parentStatus"], ["Statut enfant", r.childStatus, "childStatus"], ["Profession", r.profession, "profession"], ["École actuelle", r.school, "school"], ["Famille", r.family, "family"]];
+    return `${fieldGrid(body)}${links.length ? `<div class="timeline">${links.map(l=>`<div class="timeline-item"><strong>${escapeHtml(l.a)} ↔ ${escapeHtml(l.b)}</strong><p>${l.type}</p></div>`).join("")}</div>` : ""}${action("Ajouter une liaison", `add-linkage:${r.id}`)}`;
   })();
   return [
     detailSection("Details", "Détails", detailsBody),
@@ -2932,6 +3162,23 @@ function handleAction(key) {
   if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
   if (key.startsWith("quick-task:")) return openQuickForRecord(key.split(":")[1], "task");
   if (key.startsWith("add-payment:")) return openModal("payment", { type: key.split(":")[1] || "Don" });
+  if (key.startsWith("bday-month:")) {
+    const step = Number(key.split(":")[1]);
+    const cur = state.birthdayMonth || todayIso().slice(0, 7);
+    const [y, m] = cur.split("-").map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + step, 1));
+    state.birthdayMonth = step === 0 ? null : d.toISOString().slice(0, 7);
+    render();
+    return;
+  }
+  // "edit-record:<champ>" : clic sur une case de la fiche -> ouvre la
+  // modification de la fiche directement sur ce champ.
+  if (key.startsWith("edit-record:")) {
+    openModal("editRecord");
+    const input = dialogContent().querySelector(`[name="${key.split(":")[1]}"]`);
+    if (input) { input.scrollIntoView({ block: "center" }); setTimeout(() => input.focus(), 50); }
+    return;
+  }
   if (key.startsWith("add-linkage:")) return openModal("linkage", { recordId: key.split(":")[1] });
   // "apply-legacy-segment:<étiquette encodée>" (chip des segments historiques
   // de la page Segments) applique désormais un vrai filtre "segments" (qui ne
@@ -3013,6 +3260,7 @@ function handleAction(key) {
     "goto-interactions": () => navigate("crm", "Interactions"),
     "goto-contacts": () => navigate("crm", "Contacts"),
     "goto-portfolio": () => navigate("crm", "Portefeuille"),
+    "goto-birthdays": () => { state.birthdayMonth = null; navigate("crm", "Anniversaires"); },
     "goto-audit": () => navigate("admin", "Journal d'activité"),
   };
   (actions[key] || (() => notify("Fonctionnalité à venir")))();
@@ -3032,6 +3280,7 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   dialogContent().querySelectorAll("[data-modal-close]").forEach(btn => btn.addEventListener("click", () => d.close()));
   wirePickers(dialogContent());
   wireCategoryAdders(dialogContent());
+  wireDobPreview(dialogContent());
   // Boutons "Copier" des modèles de message (stratégie des fêtes, et tout
   // futur champ en lecture seule à copier-coller ailleurs).
   dialogContent().querySelectorAll("[data-copy-target]").forEach(btn => {
@@ -3365,6 +3614,7 @@ function openModal(kind, options = {}) {
        ${field("Nom", "last", "", "text", "required placeholder='Nom'")}
        ${field("Email", "email", "", "email", "placeholder='email@exemple.fr'")}
        ${field("Téléphone", "phone", "", "tel", "placeholder='06 12 34 56 78'")}
+       ${dobFields({})}
        ${field("Adresse", "address", "", "text", "placeholder='Adresse'")}
        ${field("Famille", "family", "", "text", "placeholder='Nom de famille commun'")}
        ${field("Étiquettes", "tags", "", "text", "placeholder='Parent, Donateur'")}`),
@@ -3410,7 +3660,7 @@ function openModal(kind, options = {}) {
       `${field("Nom du modèle", "name", "", "text", "required")}${field("Entité émettrice", "entity", "Réseau Sinaï")}${selectField("Mode", "mode", ["Automatique","Validation","Manuel"], "Validation")}${field("Signature", "signature", "Direction")}`),
     editRecord: () => selected.kind === "Structure"
       ? modalShell("editRecord", "Fiche structure", `Modifier ${selected.name}`, `${field("Nom", "name", selected.name, "text", "required")}${field("Email", "email", selected.email || "", "email")}${field("Téléphone", "phone", selected.phone || "")}${field("Adresse", "address", selected.address || "")}${field("SIREN", "siren", selected.siren || "")}${field("Forme juridique", "legal", selected.legal || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}`)
-      : modalShell("editRecord", "Fiche contact", `Modifier ${selected.name}`, `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], selected.civility || "")}${field("Prénom", "first", selected.first || "")}${field("Nom", "last", selected.last || "", "text", "required")}${field("Email principal", "email", selected.email || "", "email")}${field("Email secondaire", "secondaryEmails", selected.secondaryEmails || "")}${field("Téléphone", "phone", selected.phone || "")}${field("Téléphone 2", "phone2", selected.phone2 || "")}${field("Date de naissance", "dob", selected.dob || "")}${field("Adresse", "address", selected.address || "")}${field("Code postal", "zip", selected.zip || "")}${field("Ville", "city", selected.city || "")}${field("Pays", "country", selected.country || "")}${field("Famille", "family", selected.family || "")}${field("Rôle de foyer", "role", selected.role || "")}${field("Profession", "profession", selected.profession || "")}${field("École actuelle", "school", selected.school || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}${textareaField("Commentaire", "comment", selected.comment || "")}`),
+      : modalShell("editRecord", "Fiche contact", `Modifier ${selected.name}`, `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], selected.civility || "")}${field("Prénom", "first", selected.first || "")}${field("Nom", "last", selected.last || "", "text", "required")}${field("Email principal", "email", selected.email || "", "email")}${field("Email secondaire", "secondaryEmails", selected.secondaryEmails || "")}${field("Téléphone", "phone", selected.phone || "")}${field("Téléphone 2", "phone2", selected.phone2 || "")}${dobFields(selected)}${field("Adresse", "address", selected.address || "")}${field("Code postal", "zip", selected.zip || "")}${field("Ville", "city", selected.city || "")}${field("Pays", "country", selected.country || "")}${field("Famille", "family", selected.family || "")}${field("Rôle de foyer", "role", selected.role || "")}${field("Type de foyer", "householdType", selected.householdType || "")}${field("Statut parent", "parentStatus", selected.parentStatus || "")}${field("Statut enfant", "childStatus", selected.childStatus || "")}${field("Profession", "profession", selected.profession || "")}${field("École actuelle", "school", selected.school || "")}${field("Source", "source", selected.source || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}${textareaField("Commentaire", "comment", selected.comment || "")}`),
   };
   (modals[kind] || modals.contact)();
 }
@@ -3430,7 +3680,7 @@ function submitForm(event) {
 
   const handlers = {
     contact: () => {
-      const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first, last: data.last, name: `${data.first} ${data.last}`.trim(), email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, source: "Manuel", family: data.family, dateAdded: todayStr() };
+      const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first, last: data.last, name: `${data.first} ${data.last}`.trim(), email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, source: "Manuel", family: data.family, dob: data.dob || "", dobAfterSunset: data.dobAfterSunset === "Oui", dateAdded: todayStr() };
       ensureInAccountScope(record);
       records.unshift(record); state.selectedRecord = record.id; logAudit(`Contact ajouté : ${record.name}.`); navigate("crm", "Contacts");
     },
@@ -3555,7 +3805,8 @@ function submitForm(event) {
     editRecord: () => {
       const r = records.find(item => item.id === state.selectedRecord);
       if (r) {
-        ["civility","first","last","name","email","secondaryEmails","phone","phone2","dob","address","zip","city","country","family","role","profession","school","comment","siren","legal","agent"].forEach(key => { if (key in data) r[key] = data[key]; });
+        ["civility","first","last","name","email","secondaryEmails","phone","phone2","dob","address","zip","city","country","family","role","householdType","parentStatus","childStatus","profession","school","source","comment","siren","legal","agent"].forEach(key => { if (key in data) r[key] = data[key]; });
+        if ("dobAfterSunset" in data) r.dobAfterSunset = data.dobAfterSunset === "Oui";
         ["tags","segments","groups"].forEach(key => { if (key in data) r[key] = splitTags(data[key]); });
         // Le nom affiché (titres, listes, recherche, portefeuille...) doit
         // toujours refléter Prénom + Nom pour un contact — avant, il ne se
@@ -4003,6 +4254,7 @@ async function bootApp() {
   if (ensureHolidayReminders() && !isReadOnlyAccount()) saveCrmData();
   state.booted = true;
   render();
+  document.body.classList.remove("booting");
   if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
   // Rappels de tâches : vraies notifications push envoyées par le serveur
   // (voir Réglages) — on resynchronise juste l'état d'abonnement de cet
