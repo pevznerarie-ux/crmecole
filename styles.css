@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap");
 
 /* ============================================================
    Système de couleurs UNIQUE de l'application — direction "chic, sobre,
@@ -9,8 +9,8 @@
    l'utilisateur a explicitement choisi de s'affranchir de la couleur du
    logo ("le logo, on peut faire ce qu'on veut avec"). Le bronze n'est
    plus utilisé que pour l'action principale de chaque écran — jamais en
-   fond de grande surface, jamais sur les avatars/badges décoratifs (qui
-   passent en neutre, voir .avatar plus bas).
+   fond de grande surface, jamais sur les badges décoratifs (qui passent
+   en neutre).
    Mode sombre : mêmes variables, redéfinies sous [data-theme="dark"],
    activé/mémorisé par le bouton de la barre latérale (voir app.js). */
 :root {
@@ -48,13 +48,11 @@
   --radius: 14px;
   --radius-lg: 20px;
   --radius-pill: 980px;
-  /* Police système : sur Mac et iPhone, -apple-system EST San Francisco,
-     la police native d'Apple — sans avoir à la charger ni enfreindre de
-     licence. Inter sert de repli propre sur Windows/Android/Linux. Une
-     seule famille partout (plus de serif Fraunces, qui donnait un ton
-     "éditorial" à l'accueil, différent du reste de l'app). */
-  --display: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Arial, sans-serif;
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Arial, sans-serif;
+  /* Plus Jakarta Sans : la police système (San Francisco sur iPhone) a été
+     jugée trop banale ; celle-ci garde la sobriété voulue, avec plus de
+     caractère et des chiffres bien dessinés. Une seule famille partout. */
+  --display: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
 }
 
 :root[data-theme="dark"] {
@@ -406,33 +404,23 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
    éviter l'effet "couleur de marque partout" qui faisait moins classe. */
 .detail-head {
   position: relative;
-  display: grid;
-  grid-template-columns: 54px 1fr;
-  gap: 14px;
-  align-items: center;
-  padding: 19px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 19px 19px;
   background: linear-gradient(165deg, #2c2c2e, #1d1d1f);
   color: #fff;
 }
-.detail-close { position: absolute; top: 14px; right: 14px; background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .2); color: #fff; }
-.detail-close:hover { background: rgba(255, 255, 255, .2); border-color: rgba(255, 255, 255, .32); }
-.detail-head p { color: rgba(255, 255, 255, .6); }
+/* Flèche retour en haut à gauche (remplace l'ancien ✕ en haut à droite,
+   trop haut sur téléphone, collé à la barre de statut). */
+.detail-back { display: inline-flex; align-items: center; gap: 2px; min-height: 36px; margin-left: -8px; padding: 0 12px 0 6px; border: none; background: transparent; color: #fff; font-size: 16px; font-weight: 500; }
+.detail-back span { font-size: 30px; line-height: 1; font-weight: 300; margin-top: -3px; }
+.detail-back:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.detail-title { min-width: 0; }
+.detail-title h2 { font-size: 24px; letter-spacing: -.02em; }
+.detail-head p { color: rgba(255, 255, 255, .55); font-size: 13px; }
 .detail-head .eyebrow { color: #c7c7cc; }
-/* Avatar (initiale) : neutre et translucide plutôt que rempli d'accent —
-   l'accent bronze reste réservé à l'action principale de chaque écran. */
-.avatar {
-  width: 54px;
-  height: 54px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, .14);
-  border: 1px solid rgba(255, 255, 255, .18);
-  color: #fff;
-  font-family: var(--display);
-  font-weight: 700;
-  font-size: 16px;
-}
 .detail-kpis { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--surface-alt); }
 .detail-kpis div { padding: 13px 12px; border-right: 1px solid var(--line); }
 .detail-kpis div:last-child { border-right: 0; }
@@ -452,7 +440,7 @@ tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .detail-body { display: flex; flex-direction: column; gap: 4px; padding: 0 15px 15px; }
 .detail-section { padding-top: 18px; scroll-margin-top: 8px; }
 .detail-section + .detail-section { border-top: 1px solid var(--line); }
-.detail-section-title { margin: 0 0 12px; font-family: var(--display); font-size: 15px; font-weight: 700; color: var(--ink); }
+.detail-section-title { margin: 0 0 12px; font-family: var(--display); font-size: 18px; font-weight: 700; letter-spacing: -.01em; text-transform: none; color: var(--ink); }
 /* min-width: 0 sur ces grilles à deux colonnes (et sur `label` plus bas) :
    comme .content/.panel plus haut, une grille (ou un <label>, lui-même en
    display:grid) refuse par défaut de rétrécir sous la largeur minimale de
@@ -593,7 +581,7 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
     flex-direction: column;
     overflow-y: auto;
   }
-  .records-layout.mobile-detail-open .detail-head { flex: none; position: sticky; top: 0; z-index: 2; padding-top: calc(19px + env(safe-area-inset-top, 0px)); }
+  .records-layout.mobile-detail-open .detail-head { flex: none; position: sticky; top: 0; z-index: 2; padding-top: calc(8px + env(safe-area-inset-top, 0px)); }
   .records-layout.mobile-detail-open .detail-actions { padding-bottom: env(safe-area-inset-bottom, 0px); }
   body.detail-fullscreen .bottom-nav, body.detail-fullscreen .fab, body.detail-fullscreen .fab-menu, body.detail-fullscreen .fab-scrim { display: none; }
   .metric-grid, .home-grid, .integration-grid, .kanban, .folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1006,78 +994,92 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
 .hp-stat-note { font-size: 11.5px; color: var(--muted); }
 .hp-admin-tag { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--line); padding: 4px 10px; border-radius: 999px; }
 
+/* Bloc Tâches de l'accueil, refait façon "Rappels" d'iPhone : champs
+   remplis (fond gris doux, sans contour), case à cocher ronde, une ligne de
+   méta discrète sous chaque titre plutôt qu'une rangée de pastilles. */
 .hp-tasks { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }
-.hp-tasks .hp-activity-head { margin-bottom: 14px; }
-.hp-tasks-count { font-size: 12px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 3px 10px; border-radius: 999px; }
-.hp-task-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.hp-tasks .hp-activity-head { margin-bottom: 16px; }
+.hp-tasks-count { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--surface-alt); padding: 4px 10px; border-radius: 999px; }
+.hp-task-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .hp-task-input-wrap { position: relative; width: 100%; }
-.hp-task-input-wrap input[type="text"] { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; background: var(--bg); color: var(--ink); }
-.hp-task-input-wrap input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.hp-task-suggest { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 24px rgba(42, 35, 29, .14); z-index: 6; max-height: 220px; overflow-y: auto; padding: 4px; }
-.hp-task-suggest-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; border: none; background: transparent; padding: 8px 10px; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--ink); cursor: pointer; }
-.hp-task-suggest-item:hover { background: var(--accent-soft); color: var(--accent-2); }
-.hp-task-suggest-kind { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); flex: none; }
-.hp-task-linked { display: none; align-items: center; gap: 6px; margin-top: -2px; font-size: 12px; color: var(--muted); }
+.hp-task-input-wrap input[type="text"] { width: 100%; height: 46px; border: 1px solid transparent; border-radius: 12px; padding: 0 14px; font-size: 15px; background: var(--surface-alt); color: var(--ink); }
+.hp-task-input-wrap input[type="text"]::placeholder { color: var(--muted); }
+.hp-task-input-wrap input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--surface); }
+.hp-task-suggest { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); z-index: 6; max-height: 220px; overflow-y: auto; padding: 4px; }
+.hp-task-suggest-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 40px; text-align: left; border: none; border-radius: 8px; background: transparent; padding: 8px 10px; font-size: 14px; font-weight: 500; color: var(--ink); cursor: pointer; }
+.hp-task-suggest-item:hover { background: var(--surface-alt); color: var(--ink); }
+.hp-task-suggest-kind { font-size: 11px; font-weight: 500; color: var(--muted); flex: none; }
+.hp-task-linked { display: none; align-items: center; gap: 6px; padding: 0 4px; font-size: 13px; color: var(--muted); }
 .hp-task-linked:not([hidden]) { display: flex; }
-.hp-task-linked strong { color: var(--accent-2); font-weight: 700; }
-.hp-task-linked button { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px; }
-.hp-task-linked button:hover { color: var(--accent-2); }
-/* Deuxième rangée du formulaire : date+heure d'un côté, actions (lier un
-   contact / ajouter) de l'autre. Sur desktop les deux groupes se partagent
-   la largeur ; sur mobile (règle plus bas) ils passent chacun en pleine
-   largeur, l'un sous l'autre, pour ne jamais se comprimer. */
-.hp-task-row2 { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
-.hp-task-datetime { display: flex; gap: 8px; flex: 1 1 220px; min-width: 0; }
-.hp-task-form input[type="date"], .hp-task-form input[type="time"] { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; background: var(--bg); color: var(--ink); flex: none; min-height: 0; min-width: 0; text-transform: none; letter-spacing: normal; font-weight: 400; }
-/* Un <input type="time"> vide n'affiche aucun indice visuel (le "placeholder"
-   n'est pas pris en charge sur ce type de champ) : sans libellé, il
-   ressemblait à un simple encadré vide/cassé. On enveloppe donc date et
-   heure dans un petit libellé ("Date"/"Heure") au lieu de les laisser nus
-   dans la rangée. */
-.hp-task-field { display: flex; flex-direction: column; gap: 3px; flex: 1 1 0; min-width: 0; color: var(--muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.hp-task-linked strong { color: var(--accent); font-weight: 600; }
+.hp-task-linked button { min-height: 0; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+.hp-task-linked button:hover { color: var(--ink); background: transparent; }
+/* Deuxième rangée : date + heure, puis les deux boutons. Sur desktop tout
+   tient sur une ligne ; sur mobile (règle plus bas) les boutons passent
+   dessous en pleine largeur. */
+.hp-task-row2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hp-task-datetime { display: flex; gap: 8px; flex: 1 1 260px; min-width: 0; }
+/* Chaque champ est une "cellule" grise avec son libellé à gauche et la
+   valeur à droite, comme dans Réglages d'iPhone. -webkit-appearance: none
+   est indispensable : sans lui, Safari iOS impose sa propre largeur
+   minimale aux champs date/heure, qui débordaient alors hors de la carte,
+   et centre leur texte. */
+.hp-task-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 1 1 0; min-width: 0; height: 46px; padding: 0 12px 0 14px; border-radius: 12px; background: var(--surface-alt); color: var(--muted); font-size: 13px; font-weight: 500; position: relative; }
+.hp-task-field > span { flex: none; }
+.hp-task-form input[type="date"], .hp-task-form input[type="time"] { -webkit-appearance: none; appearance: none; display: block; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; height: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--ink); font-size: 14px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.hp-task-form input[type="date"]::-webkit-date-and-time-value, .hp-task-form input[type="time"]::-webkit-date-and-time-value { text-align: right; margin: 0; }
+/* Icône calendrier/horloge masquée (elle mangeait la place de la valeur) :
+   toute la cellule ouvre le sélecteur au clic, voir app.js. */
+.hp-task-form input[type="date"]::-webkit-calendar-picker-indicator, .hp-task-form input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
+.hp-task-field { cursor: pointer; }
+.hp-task-field:first-child { flex-grow: 1.35; }
+.hp-task-form input[type="date"]:focus, .hp-task-form input[type="time"]:focus { box-shadow: none; }
+.hp-task-field:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+/* Heure vide : "Facultatif" en gris (pas de placeholder possible sur un
+   champ heure ; data-empty est entretenu par app.js). */
+.hp-task-field[data-empty] input[type="time"] { color: transparent; }
+.hp-task-field[data-empty]::after { content: "Facultatif"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 14px; font-weight: 500; pointer-events: none; }
+.hp-task-field[data-empty]:focus-within::after { content: none; }
+.hp-task-field[data-empty]:focus-within input[type="time"] { color: var(--ink); }
 .hp-task-actions { display: flex; gap: 8px; flex: none; }
-.hp-task-btn-icon { font-size: 14px; line-height: 1; font-weight: 600; }
-.hp-task-link-btn, .hp-task-add { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 38px; border-radius: var(--radius-pill); font-size: 12.5px; font-weight: 700; padding: 0 14px; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
-.hp-task-link-btn { border: 1.5px solid var(--accent); background: var(--surface); color: var(--accent); }
-.hp-task-link-btn:hover { background: var(--accent-soft); }
-.hp-task-add { border: none; background: var(--accent); color: var(--on-accent); }
-.hp-task-add .hp-task-btn-icon { font-size: 16px; }
-.hp-task-add:hover { background: var(--accent-2); }
+.hp-task-btn-icon { font-size: 17px; line-height: 1; font-weight: 500; }
+.hp-task-link-btn, .hp-task-add { display: flex; align-items: center; justify-content: center; gap: 6px; height: 46px; min-height: 0; border: none; border-radius: var(--radius-pill); font-size: 15px; font-weight: 600; padding: 0 18px; cursor: pointer; white-space: nowrap; transition: background .15s ease; }
+.hp-task-link-btn { background: var(--surface-alt); color: var(--ink); }
+.hp-task-link-btn:hover { background: var(--line); color: var(--ink); }
+.hp-task-add { background: var(--accent); color: var(--on-accent); }
+.hp-task-add:hover { background: var(--accent-2); color: var(--on-accent); }
+
 .hp-task-list { display: flex; flex-direction: column; }
-.hp-task-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; row-gap: 8px; padding: 12px 2px; border-bottom: 1px solid var(--line); }
+.hp-task-row { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .hp-task-row:last-child { border-bottom: none; }
-.hp-task-checkbox { width: 17px; height: 17px; accent-color: var(--accent); flex: none; cursor: pointer; }
-.hp-task-main { flex: 1 1 auto; min-width: 60px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.hp-task-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: none; }
-.hp-task-title { min-width: 40px; font-size: 13.5px; color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hp-task-contact-chip { flex: none; border: none; background: var(--accent-soft); color: var(--accent-2); font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer; }
-.hp-task-contact-chip:hover { background: var(--accent); color: var(--on-accent); }
-/* .hp-task-date est désormais un <button> (badge compact date+heure, ex.
-   "Aujourd'hui · 14:30") qui ouvre la modale "Modifier la tâche" au clic,
-   plutôt qu'un <input type="date"> édité en ligne : sur mobile, un input
-   date natif y affiche le format verbeux du système ("Oct 8, 2026" sur
-   iOS, non raccourcissable par CSS) et devait en plus passer à 16px pour
-   éviter le zoom auto de Safari — d'où des pastilles disproportionnées.
-   Un badge texte, lui, reste compact et cohérent sur tous les écrans. */
-.hp-task-date { flex: none; min-height: 0; width: auto; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-size: 11px; font-weight: 600; background: var(--bg); color: var(--muted); white-space: nowrap; cursor: pointer; font-variant-numeric: tabular-nums; transition: filter .12s ease; }
-.hp-task-date:hover, .hp-task-date:focus-visible { outline: none; filter: brightness(0.96); }
-.hp-task-date-late { border-color: #e2a190; background: #fbe4de; color: #a13a1f; }
-.hp-task-date-today { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-2); }
-.hp-task-date-soon { border-color: #c9d2bd; background: #eef0e8; color: #566047; }
-/* Pastille "assigné à" : même langage visuel (pilule compacte) que la pastille
-   date juste à côté, plutôt qu'un simple texte gris flottant sans cadre,
-   pour que les deux informations se lisent comme un même groupe cohérent. */
-.hp-task-assignee { display: inline-flex; align-items: center; gap: 5px; flex: none; font-size: 10.5px; font-weight: 600; color: var(--muted); background: var(--bg); border: 1px solid var(--line); padding: 4px 10px 4px 8px; border-radius: 999px; white-space: nowrap; }
-.hp-task-assignee-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
-.hp-task-row-icons { display: flex; align-items: center; gap: 2px; flex: none; }
-.hp-task-edit, .hp-task-remove { border: none; background: transparent; color: var(--muted); font-size: 13px; cursor: pointer; padding: 4px; border-radius: 6px; flex: none; opacity: 0; transition: opacity .15s ease; }
+/* Case ronde (Rappels d'iPhone) : cercle vide, rempli de l'accent avec une
+   coche une fois la tâche faite. */
+.hp-task-checkbox { -webkit-appearance: none; appearance: none; flex: none; width: 22px; height: 22px; min-height: 0; padding: 0; margin: 0; margin-top: 1px; border: 1.5px solid var(--line-strong); border-radius: 50%; background: transparent; cursor: pointer; display: grid; place-items: center; transition: background .15s ease, border-color .15s ease; }
+.hp-task-checkbox:hover { border-color: var(--accent); }
+.hp-task-checkbox:checked { background: var(--accent); border-color: var(--accent); }
+.hp-task-checkbox:checked::after { content: ""; width: 6px; height: 11px; border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: translateY(-1px) rotate(45deg); }
+.hp-task-checkbox:focus-visible { box-shadow: 0 0 0 3px var(--accent-soft); }
+.hp-task-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.hp-task-title { font-size: 15px; line-height: 1.35; color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+/* Ligne de méta : simples textes séparés par des points, cliquables pour
+   l'échéance (modifier) et le contact (ouvrir la fiche). */
+.hp-task-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 12px; font-size: 13px; color: var(--muted); }
+.hp-task-date, .hp-task-contact-chip { min-height: 0; padding: 0; border: none; border-radius: 0; background: none; font-size: 13px; line-height: 1.4; cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hp-task-date { font-weight: 500; color: var(--muted); }
+.hp-task-date:hover, .hp-task-contact-chip:hover { background: none; text-decoration: underline; }
+.hp-task-date-late, .hp-task-date-late:hover { color: var(--danger); }
+.hp-task-date-today, .hp-task-date-today:hover { color: var(--accent); }
+.hp-task-date-soon, .hp-task-date-soon:hover { color: var(--ink-soft); }
+.hp-task-contact-chip, .hp-task-contact-chip:hover { font-weight: 600; color: var(--ink); }
+.hp-task-assignee { font-weight: 500; white-space: nowrap; }
+.hp-task-row-icons { display: flex; align-items: center; gap: 0; flex: none; margin: -6px -6px 0 0; }
+.hp-task-edit, .hp-task-remove { width: 32px; height: 32px; min-height: 0; padding: 0; display: grid; place-items: center; border: none; border-radius: 50%; background: transparent; color: var(--muted); font-size: 14px; cursor: pointer; opacity: 0; transition: opacity .15s ease, background .15s ease; }
 .hp-task-row:hover .hp-task-edit, .hp-task-row:hover .hp-task-remove { opacity: 1; }
-.hp-task-edit:hover { color: var(--accent-2); background: var(--accent-soft); }
-.hp-task-remove:hover { color: var(--accent-2); background: var(--accent-soft); }
+.hp-task-edit:hover, .hp-task-remove:hover { color: var(--ink); background: var(--surface-alt); }
 .hp-task-row-done .hp-task-title { text-decoration: line-through; color: var(--muted); }
-.hp-task-row-done { opacity: .75; }
+.hp-task-row-done { opacity: .7; }
 .hp-tasks-done-toggle { margin-top: 10px; }
-.hp-task-list-done { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.hp-task-list-done { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 4px; }
 
 /* ---- Mon portefeuille (accueil) : suivi des relations donateurs -------- */
 .hp-portfolio { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 22px; margin-bottom: 34px; }
@@ -1173,13 +1175,9 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
      boutons ("+ Contact" / "Ajouter") se partagent alors la largeur à
      parts égales — de vrais boutons tactiles, plus les petites icônes
      écrasées d'avant. */
-  .hp-task-row2 { flex-direction: column; align-items: stretch; }
-  .hp-task-datetime { flex-basis: 100%; }
-  .hp-task-actions { flex-basis: 100%; }
+  .hp-task-row2 { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+  .hp-task-datetime, .hp-task-actions { flex: none; }
   .hp-task-link-btn, .hp-task-add { flex: 1 1 0; }
-  .hp-task-date { font-size: 10.5px; padding: 4px 8px; }
-  .hp-task-contact-chip { font-size: 10px; }
-  .hp-task-assignee { font-size: 10px; padding: 3px 8px 3px 7px; }
   /* Sur tactile il n'y a pas de survol : les boutons modifier/supprimer
      restaient invisibles en permanence (opacity 0 tant qu'on ne survole pas
      la ligne), donc impossible d'y toucher au doigt. On les affiche toujours
@@ -1189,7 +1187,6 @@ input[readonly], .field-locked { background: var(--surface-alt); color: var(--mu
      plus à côté du titre sur une seule ligne : on les fait passer ensemble
      à la ligne suivante (basis 100%) plutôt que de laisser le dernier
      bouton déborder hors de l'écran, invisible et impossible à toucher. */
-  .hp-task-controls { flex: 1 1 100%; justify-content: flex-end; }
   .hp-holiday-row { flex-direction: column; align-items: stretch; }
   .hp-holiday-row button { width: 100%; }
   .hp-portfolio-row { flex-direction: column; align-items: stretch; }

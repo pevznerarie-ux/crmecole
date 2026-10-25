@@ -330,6 +330,7 @@ const state = {
   // c'est ce deuxième cas qui doit, sur mobile, remplacer la liste par la
   // fiche au lieu de l'empiler tout en bas (voir styles.css, .mobile-detail-open).
   mobileDetailOpen: false,
+  detailReturn: null,
   // Onglet "Doublons potentiels" (tiroir) : recherche libre, et/ou focus sur
   // les doublons d'une seule fiche (ouvert depuis son bouton "Voir les doublons").
   dedupeQuery: "",
@@ -1459,7 +1460,7 @@ function taskDueInfo(t) {
   if (!t.dueDate) return { tone: "none", label: "" };
   const today = todayIso();
   const timeSuffix = t.dueTime ? ` · ${t.dueTime}` : "";
-  if (t.dueDate < today) return { tone: "late", label: `En retard — ${formatFrDate(t.dueDate)}${timeSuffix}` };
+  if (t.dueDate < today) return { tone: "late", label: `En retard · ${formatFrDate(t.dueDate)}${timeSuffix}` };
   if (t.dueDate === today) return { tone: "today", label: `Aujourd'hui${timeSuffix}` };
   return { tone: "soon", label: `${formatFrDate(t.dueDate)}${timeSuffix}` };
 }
@@ -1505,7 +1506,7 @@ function hpTasksPanel() {
       <div class="hp-task-row2">
         <div class="hp-task-datetime">
           <label class="hp-task-field"><span>Date</span><input type="date" name="dueDate" value="${todayIso()}"></label>
-          <label class="hp-task-field"><span>Heure</span><input type="time" name="dueTime" value="" title="Heure (si nécessaire)"></label>
+          <label class="hp-task-field" data-empty><span>Heure</span><input type="time" name="dueTime" value="" title="Heure (si nécessaire)"></label>
         </div>
         <div class="hp-task-actions">
           <button type="button" class="hp-task-link-btn" id="hpTaskCreateContact" title="Créer un nouveau contact et le lier à cette tâche"><span class="hp-task-btn-icon" aria-hidden="true">+</span><span class="hp-task-btn-label">Contact</span></button>
@@ -1523,27 +1524,27 @@ function hpTaskRow(t) {
   const due = taskDueInfo(t);
   const linkedRecord = t.recordId ? recordById(t.recordId) : null;
   const done = t.status === "fait";
-  // Les commandes de fin de ligne (date, assigné, modifier, supprimer) sont
-  // regroupées dans leur propre bloc : sur un petit écran, ajouter le bouton
-  // "Modifier" en plus de "Supprimer" ne tenait plus sur une seule ligne à
-  // côté du titre et débordait hors de l'écran (invisible et impossible à
-  // toucher). Ce regroupement permet de le faire passer proprement à la
-  // ligne suivante sur mobile, sans rien changer sur desktop où il y a
-  // largement la place.
+  // Mise en page type "Rappels" d'iPhone : case ronde, titre sur toute la
+  // largeur, puis une ligne de méta discrète (échéance colorée · contact ·
+  // assigné) au lieu d'une rangée de pastilles qui passait à la ligne et
+  // flottait à droite sur mobile. Modifier/supprimer restent à droite.
+  const dueBtn = due.label
+    ? `<button type="button" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-action="edit-task:${t.id}" title="Modifier l'échéance">${escapeHtml(due.label)}</button>`
+    : `<button type="button" class="hp-task-date hp-task-date-none" data-action="edit-task:${t.id}" title="Ajouter une échéance">Sans échéance</button>`;
   return `<div class="hp-task-row${done ? " hp-task-row-done" : ""}">
-    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""}>
-    <div class="hp-task-main">
+    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""} aria-label="Marquer comme faite">
+    <div class="hp-task-body">
       <span class="hp-task-title">${escapeHtml(t.title)}</span>
-      ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
-      ${t.holidayKey ? `<button type="button" class="hp-task-contact-chip" data-action="holiday-prepare:${t.holidayKey}" title="Ouvrir la case idée">💡 Idée</button>` : ""}
-    </div>
-    <div class="hp-task-controls">
-      ${due.label ? `<button type="button" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-action="edit-task:${t.id}" title="Modifier l'échéance">${escapeHtml(due.label)}</button>` : `<button type="button" class="hp-task-date hp-task-date-none" data-action="edit-task:${t.id}" title="Ajouter une échéance">Sans échéance</button>`}
-      ${t.assignedTo ? `<span class="hp-task-assignee" title="Assignée à ${escapeHtml(t.assignedTo)}"><span class="hp-task-assignee-dot" aria-hidden="true"></span>${escapeHtml(t.assignedTo)}</span>` : ""}
-      <div class="hp-task-row-icons">
-        <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier">✎</button>
-        <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer">✕</button>
+      <div class="hp-task-meta">
+        ${dueBtn}
+        ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
+        ${t.holidayKey ? `<button type="button" class="hp-task-contact-chip" data-action="holiday-prepare:${t.holidayKey}" title="Ouvrir la case idée">💡 Idée</button>` : ""}
+        ${t.assignedTo ? `<span class="hp-task-assignee" title="Assignée à ${escapeHtml(t.assignedTo)}">${escapeHtml(t.assignedTo)}</span>` : ""}
       </div>
+    </div>
+    <div class="hp-task-row-icons">
+      <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier" aria-label="Modifier">✎</button>
+      <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer" aria-label="Supprimer">✕</button>
     </div>
   </div>`;
 }
@@ -2363,9 +2364,15 @@ const DETAIL_SECTIONS = [
 ];
 
 function recordDetail(r) {
-  const initial = r.kind === "Structure" ? "ST" : (r.first?.[0] || r.name?.[0] || "C");
+  // Pas de cercle d'initiale (retiré à la demande) ; le ✕ en haut à droite
+  // est remplacé par une flèche retour en haut à gauche, à portée du pouce
+  // et sous la barre de statut du téléphone, qui ramène à l'écran d'où la
+  // fiche a été ouverte (voir state.detailReturn dans open-record).
   return `<aside class="panel detail-card">
-    <div class="detail-head"><div class="avatar">${escapeHtml(initial)}</div><div><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div><button class="icon-btn detail-close" type="button" data-action="close-detail" title="Fermer et voir toute la liste">✕</button></div>
+    <div class="detail-head">
+      <button class="detail-back" type="button" data-action="close-detail" title="Revenir à l'écran précédent"><span aria-hidden="true">‹</span>Retour</button>
+      <div class="detail-title"><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div>
+    </div>
     ${isRecordDuplicated(r.id) ? `<div class="dup-alert"><span>⚠ Doublon potentiel détecté</span>${action("Voir les doublons", `dedupe-focus:${r.id}`)}</div>` : ""}
     <div class="detail-kpis">
       <div><strong>${euro(recordTotalAmount(r))}</strong><span>Total</span></div>
@@ -2448,6 +2455,11 @@ function scrollDetailToSection(key, smooth) {
   // vise plutôt le haut de la fiche entière dans ce cas.
   const target = key === "Details" ? card : card.querySelector(`[data-section="${key}"]`);
   if (!target) return;
+  // Sur mobile, le bandeau (Retour + nom) reste collé en haut de la fiche :
+  // sans cette marge, le titre de la section visée passait dessous.
+  const head = card.querySelector(".detail-head");
+  const stickyHead = head && getComputedStyle(head).position === "sticky";
+  if (target !== card) target.style.scrollMarginTop = `${(stickyHead ? head.offsetHeight : 0) + 8}px`;
   target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
 }
 
@@ -2666,6 +2678,17 @@ function bind() {
       if (next) { next.focus(); next.setSelectionRange(cursor, cursor); }
     });
   });
+  // Un <input type="time"> vide n'a pas de placeholder (iOS l'affiche comme
+  // un encadré vide) : data-empty sur son libellé fait apparaître
+  // "Facultatif" en CSS tant qu'aucune heure n'est choisie.
+  document.querySelectorAll("#hpTaskForm .hp-task-field").forEach(cell => {
+    cell.addEventListener("click", () => { try { cell.querySelector("input")?.showPicker?.(); } catch { /* sélecteur indisponible */ } });
+  });
+  document.querySelectorAll("#hpTaskForm input[type=time]").forEach(el => {
+    const sync = () => el.closest(".hp-task-field")?.toggleAttribute("data-empty", !el.value);
+    el.addEventListener("input", sync);
+    el.addEventListener("change", sync);
+  });
   document.querySelector("#hpTaskForm")?.addEventListener("submit", e => {
     e.preventDefault();
     const form = e.target;
@@ -2804,6 +2827,12 @@ function handleAction(key) {
   if (key.startsWith("open-record:")) {
     const [, id, tab] = key.split(":");
     if (recordById(id)) {
+      // Mémorise l'écran d'origine (accueil, paiements...) pour que la
+      // flèche "Retour" de la fiche y ramène, au même endroit de la page,
+      // plutôt que sur la liste des contacts.
+      const fromList = state.view === "crm" && ["Contacts", "Structures"].includes(state.section);
+      if (!fromList) state.detailReturn = { view: state.view, section: state.section, scrollY: window.scrollY };
+      else if (!state.mobileDetailOpen) state.detailReturn = null;
       navigate("crm", recordById(id).kind === "Structure" ? "Structures" : "Contacts");
       state.selectedRecord = id;
       state.showDetail = true;
@@ -2884,7 +2913,18 @@ function handleAction(key) {
     "export-receipt-log": () => downloadCsv(`suivi-comptable-cerfa-${todayStr().replace(/\//g,"-")}.csv`, receiptLog),
     "edit-record": () => openModal("editRecord"),
     "delete-record": () => deleteSelectedRecord(),
-    "close-detail": () => { state.showDetail = false; state.mobileDetailOpen = false; render(); },
+    "close-detail": () => {
+      const back = state.detailReturn;
+      state.detailReturn = null;
+      if (back) {
+        navigate(back.view, back.section);
+        state.showDetail = false;
+        render();
+        window.scrollTo(0, back.scrollY || 0);
+        return;
+      }
+      state.showDetail = false; state.mobileDetailOpen = false; render();
+    },
     "open-detail": () => { state.showDetail = true; state.mobileDetailOpen = true; render(); scrollToTop(); },
     "goto-receipts": () => navigate("pay", "Reçus"),
     "goto-interactions": () => navigate("crm", "Interactions"),
