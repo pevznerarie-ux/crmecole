@@ -3815,6 +3815,28 @@ document.querySelector("#exportBtn").addEventListener("click", () => handleActio
 document.querySelector("#navToggle").addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
 document.querySelector("#navScrim").addEventListener("click", closeNav);
 
+// Thème clair/sombre : persisté dans localStorage, appliqué via l'attribut
+// data-theme sur <html> (voir le script "anti-flash" dans index.html qui
+// applique déjà la valeur mémorisée avant même que ce fichier ne se charge).
+const THEME_KEY = "crm-theme";
+function getEffectiveTheme() {
+  const saved = document.documentElement.getAttribute("data-theme");
+  if (saved === "light" || saved === "dark") return saved;
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* stockage indisponible */ }
+  const btn = document.querySelector("#themeToggle");
+  const label = document.querySelector("#themeToggleLabel");
+  if (btn) btn.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
+  if (label) label.textContent = theme === "dark" ? "Mode clair" : "Mode sombre";
+}
+applyTheme(getEffectiveTheme());
+document.querySelector("#themeToggle")?.addEventListener("click", () => {
+  applyTheme(getEffectiveTheme() === "dark" ? "light" : "dark");
+});
+
 // Doublons du haut, repris dans le tiroir de menu mobile (le bandeau de
 // boutons du haut est masqué en dessous de 720px pour dégager l'écran).
 document.querySelector("#dupBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("dedupe"); });

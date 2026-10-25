@@ -2,6 +2,15 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
+    <!-- Applique le thème clair/sombre mémorisé AVANT le premier affichage
+         de la page (sinon on verrait un bref flash du thème par défaut avant
+         que app.js, chargé en bas de page, n'ait le temps de le corriger). -->
+    <script>
+      try {
+        var t = localStorage.getItem("crm-theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>CRM Sinaï</title>
     <meta name="description" content="CRM interne des institutions Sinaï : contacts, dons et interactions." />
@@ -35,6 +44,13 @@
           <strong>Profil administrateur</strong>
           <p>Accès lecture, modification, export, paramétrage, paiements et reçus fiscaux.</p>
         </div>
+        <button type="button" class="theme-toggle" id="themeToggle" aria-pressed="false">
+          <span class="theme-toggle-icon" aria-hidden="true">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v3M12 18.5v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z"/></svg>
+          </span>
+          <span class="theme-toggle-label" id="themeToggleLabel">Mode sombre</span>
+        </button>
         <button type="button" class="logout-btn" id="logoutBtn">Se déconnecter</button>
       </aside>
 
