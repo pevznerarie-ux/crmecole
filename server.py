@@ -689,6 +689,38 @@ def migrate_merge_duplicate_tags(db):
     )
 
 
+UPGRADE_BACKUP_FILE = DATA_ROOT / "crm-avant-mise-a-jour-synchro.sqlite"
+
+
+def backup_before_upgrade():
+    """Copie de sécurité de la base, faite une seule fois : au premier
+    démarrage de la version qui enregistre fiche par fiche, AVANT toute
+    modification. Elle reste à côté de la base (même volume), n'est jamais
+    servie par le serveur, et permet de revenir exactement à l'état d'avant
+    la mise à jour si besoin."""
+    if not DB_FILE.exists() or UPGRADE_BACKUP_FILE.exists():
+        return
+    try:
+        source = sqlite3.connect(DB_FILE)
+        try:
+            already = source.execute("SELECT value FROM meta WHERE key = 'keyNormV1'").fetchone()
+        except sqlite3.Error:
+            already = None
+        if already:
+            source.close()
+            return
+        partial = UPGRADE_BACKUP_FILE.with_suffix(".partiel")
+        target = sqlite3.connect(partial)
+        source.backup(target)
+        target.close()
+        source.close()
+        partial.replace(UPGRADE_BACKUP_FILE)
+        size_mb = UPGRADE_BACKUP_FILE.stat().st_size / 1_000_000
+        print(f"[sauvegarde] Copie de la base avant mise à jour : {UPGRADE_BACKUP_FILE} ({size_mb:.1f} Mo)")
+    except Exception as exc:
+        print(f"[sauvegarde] Copie avant mise à jour impossible : {exc}")
+
+
 def init_db():
     with connect() as db:
         db.execute(
@@ -1939,6 +1971,7 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    backup_before_upgrade()
     init_db()
     apply_emergency_password_reset()
     port = int(os.environ.get("PORT", "8766"))
