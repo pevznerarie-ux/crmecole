@@ -1,6 +1,10 @@
 /* =========================================================================
-   CRM Sinaï — application front (aucune dépendance de build, un seul fichier)
-   Sections :
+   CRM Sinaï — cœur de l'application (aucune dépendance de build).
+   Trois fichiers chargés dans cet ordre, qui partagent les mêmes variables :
+     app.js        données, synchronisation, formulaires, import, connexion
+     app-views.js  affichage des pages (tableau de bord, fiches, collecte...)
+     app-tools.js  outils d'interface (recherche globale, menus, exports...)
+   Sections de ce fichier :
      1. Constantes & mapping de colonnes d'import
      2. Client API (fetch async, jamais bloquant)
      3. État & données de départ (aucune donnée factice)
@@ -20,7 +24,7 @@
 const STORAGE_KEY = "sinai-crm-local-state-v2";
 const AUTH_TOKEN_KEY = "sinai-crm-auth-token";
 const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:8766" : "";
-const AUDIT_LIMIT = 200;
+const AUDIT_LIMIT = 1000;
 // Statuts de paiement considérés "en attente" (promesse pas encore encaissée) :
 // "Promis" est le seul statut littéral utilisé par l'appli elle-même : les
 // ~11 000 paiements importés avant le CRM portent des statuts historiques
@@ -242,22 +246,58 @@ async function apiGetState() {
   }
 }
 
-function loadLocalBackup() {
+// ---- Petite base locale (IndexedDB) ---------------------------------------
+// Garde sur l'appareil la dernière copie des données (pour consulter le CRM
+// sans réseau) et les modifications pas encore envoyées au serveur. Remplace
+// l'ancienne copie dans localStorage, limitée à ~5 Mo : avec plusieurs
+// milliers de dons elle débordait et n'était en pratique jamais écrite.
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    try {
+      const req = indexedDB.open("sinai-crm", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    } catch (err) { reject(err); }
+  });
+}
+async function idbSet(key, value) {
   try {
-    if (!window.localStorage) return null;
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    return data && data.version === 1 ? data : null;
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(value, key);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch { /* stockage local indisponible : tant pis */ }
+}
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+    const value = await new Promise((resolve, reject) => {
+      const req = db.transaction("kv").objectStore("kv").get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return value ?? null;
   } catch {
     return null;
   }
 }
-
-function saveLocalBackup(data) {
+async function idbDel(key) {
   try {
-    if (window.localStorage) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch { /* stockage local indisponible : tant pis, on retentera au prochain enregistrement */ }
+    const db = await idbOpen();
+    await new Promise(resolve => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").delete(key);
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+    });
+    db.close();
+  } catch { /* rien à effacer */ }
 }
 
 function setSaveIndicator(text, tone) {
@@ -271,42 +311,108 @@ function setSaveIndicator(text, tone) {
   }
 }
 
+// Toutes les listes de données du CRM, par nom (mêmes noms que côté serveur).
+const SYNC_COLLECTIONS = ["records", "payments", "interactions", "tasks", "campaigns", "savedViews", "linkages", "groups", "imports", "receiptLog", "auditLog", "users", "customFields", "receiptTemplates", "interactionCategories", "dismissedDuplicates"];
+function crmCollections() {
+  return { records, payments, interactions, tasks, campaigns, savedViews, linkages, groups, imports, receiptLog, auditLog, users, customFields, receiptTemplates, interactionCategories, dismissedDuplicates };
+}
 function currentCrmData() {
-  return {
-    version: 1,
-    savedAt: nowIso(),
-    state: { selectedRecord: state.selectedRecord },
-    records, payments, imports, users, groups, interactions, linkages,
-    customFields, receiptTemplates, savedViews, auditLog, interactionCategories, tasks,
-    holidayNotes, receiptLog, dismissedDuplicates,
-  };
+  return { version: 1, rev: syncRev, savedAt: nowIso(), state: {}, ...crmCollections(), holidayNotes };
+}
+
+// ---- Synchronisation fiche par fiche --------------------------------------
+// Le navigateur garde une "photo" de ce que le serveur connaît (syncSnapshot)
+// et, à chaque enregistrement, n'envoie que ce qui a changé depuis : les
+// éléments créés ou modifiés, et les identifiants de ceux qui ont été
+// supprimés. Avant, chaque clic renvoyait TOUT le CRM, qui remplaçait la base
+// entière : si deux personnes travaillaient en même temps, la dernière à
+// enregistrer effaçait ce que l'autre venait de saisir. Le numéro de révision
+// (syncRev) sert à repérer qu'un collègue a modifié quelque chose entre-temps,
+// pour récupérer ses changements.
+let syncRev = 0;
+let syncSnapshot = null;
+let saveSeq = 0;
+let saveWaiters = [];
+
+// Une liste dont chaque élément porte un identifiant unique se synchronise
+// élément par élément ; les autres (listes de simples textes, petits
+// réglages) sont renvoyées d'un bloc quand elles changent.
+function snapshotCollection(list) {
+  const map = new Map();
+  for (const item of list) {
+    if (!item || typeof item !== "object" || !item.id || map.has(String(item.id))) {
+      return { mode: "whole", json: JSON.stringify(list) };
+    }
+    map.set(String(item.id), JSON.stringify(item));
+  }
+  return { mode: "items", map };
+}
+function snapshotOf(data) {
+  const collections = {};
+  SYNC_COLLECTIONS.forEach(name => { collections[name] = snapshotCollection(Array.isArray(data[name]) ? data[name] : []); });
+  return { collections, holidayNotes: JSON.stringify(data.holidayNotes || {}) };
+}
+function buildSyncPayload() {
+  const current = crmCollections();
+  const next = { collections: {}, holidayNotes: JSON.stringify(holidayNotes || {}) };
+  const changes = {}, replace = {}, meta = {};
+  let count = 0;
+  SYNC_COLLECTIONS.forEach(name => {
+    const list = current[name] || [];
+    const now = snapshotCollection(list);
+    const before = syncSnapshot.collections[name] || { mode: "items", map: new Map() };
+    next.collections[name] = now;
+    if (now.mode === "items" && before.mode === "items") {
+      const upsert = [], remove = [];
+      list.forEach(item => { const id = String(item.id); if (before.map.get(id) !== now.map.get(id)) upsert.push(item); });
+      before.map.forEach((_, id) => { if (!now.map.has(id)) remove.push(id); });
+      if (upsert.length || remove.length) { changes[name] = { upsert, remove }; count += upsert.length + remove.length; }
+    } else {
+      const nowJson = now.mode === "whole" ? now.json : JSON.stringify(list);
+      if (before.mode !== "whole" || before.json !== nowJson) { replace[name] = list; count += 1; }
+    }
+  });
+  if (next.holidayNotes !== syncSnapshot.holidayNotes) { meta.holidayNotes = holidayNotes; count += 1; }
+  return { payload: { version: 1, baseRev: syncRev, changes, replace, meta }, next, count };
 }
 
 // Renvoie le résultat RÉEL de l'enregistrement : "ok", "denied" (refusé par
 // le serveur, ex. compte Lecture seule), "error" (autre refus serveur),
-// "offline" (pas de réseau) ou "unauthorized" (session expirée). Avant, les
-// formulaires affichaient "Enregistré" sans attendre, même quand le serveur
-// avait refusé : le contact disparaissait ensuite au rechargement. Un échec
-// est maintenant toujours signalé par un message bien visible, quel que soit
-// l'endroit de l'app qui a déclenché l'enregistrement.
-let saveWaiters = [];
-async function saveCrmData() {
+// "offline" (pas de réseau) ou "unauthorized" (session expirée). Un échec est
+// toujours signalé par un message bien visible.
+async function saveCrmData(opts = {}) {
   if (isReadOnlyAccount()) { notify(READ_ONLY_MSG); revertToServerState(); return "denied"; }
+  if (!syncSnapshot) {
+    // Aucune donnée n'a pu être chargée (serveur injoignable au démarrage et
+    // pas de copie locale) : rien ne peut être enregistré de façon fiable.
+    notify("⚠ Serveur injoignable : cette modification n'est pas enregistrée. Vérifiez la connexion puis rechargez la page.", true);
+    return "offline";
+  }
+  saveSeq += 1;
   if (saveInFlight) { savePending = true; return new Promise(resolve => saveWaiters.push(resolve)); }
+  const { payload, next, count } = buildSyncPayload();
+  if (!count) return "ok";
   saveInFlight = true;
-  setSaveIndicator("Enregistrement…", "busy");
-  const payload = currentCrmData();
-  saveLocalBackup(payload);
+  if (!opts.silent) setSaveIndicator("Enregistrement…", "busy");
   let outcome = "ok";
+  let stale = false;
   try {
-    const res = await fetch(`${API_BASE}/api/state`, {
+    const res = await fetch(`${API_BASE}/api/sync`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
     if (res.status === 401) { outcome = "unauthorized"; handleUnauthorized(); }
-    else if (res.ok) { setSaveIndicator("Enregistré", "ok"); }
-    else {
+    else if (res.ok) {
+      const data = await res.json();
+      stale = data.applied ? data.rev > syncRev + 1 : data.rev !== syncRev;
+      syncSnapshot = next;
+      syncRev = data.rev;
+      idbDel("pending");
+      scheduleLocalBackup();
+      if (!opts.silent) setSaveIndicator("Enregistré", "ok");
+      if ((data.denied || []).length) notify("⚠ Certaines modifications n'ont pas été acceptées : elles sortent du périmètre de votre compte", true);
+    } else {
       outcome = res.status === 403 ? "denied" : "error";
       const msg = (await res.json().catch(() => null))?.error;
       setSaveIndicator("Non enregistré", "warn");
@@ -315,29 +421,120 @@ async function saveCrmData() {
     }
   } catch {
     outcome = "offline";
-    setSaveIndicator("Hors ligne — enregistré sur cet appareil", "warn");
-    notify("⚠ Hors ligne : enregistré sur cet appareil seulement, pas encore sur le serveur", true);
+    idbSet("pending", { accountId: currentAccount?.id, payload });
+    setSaveIndicator("Hors ligne — sera envoyé au retour du réseau", "warn");
+    if (!opts.silent) notify("⚠ Hors ligne : la modification est gardée sur cet appareil et sera envoyée dès le retour du réseau", true);
   } finally {
     saveInFlight = false;
     if (savePending) {
       savePending = false;
       const waiters = saveWaiters;
       saveWaiters = [];
-      saveCrmData().then(o => waiters.forEach(w => w(o)));
+      saveCrmData(opts).then(o => waiters.forEach(w => w(o)));
+    } else if (stale) {
+      pullFromServer();
     }
   }
   return outcome;
 }
 
+// Copie locale pour le mode hors ligne : écrite quelques secondes après la
+// dernière synchronisation réussie, et seulement si tout ce qui est à l'écran
+// est bien connu du serveur (sinon on mélangerait données confirmées et
+// modifications en attente, qui sont gardées à part sous "pending").
+function scheduleLocalBackup() {
+  clearTimeout(scheduleLocalBackup._t);
+  scheduleLocalBackup._t = setTimeout(() => {
+    if (saveInFlight || !syncSnapshot || !currentAccount || buildSyncPayload().count) return;
+    idbSet("state", { accountId: currentAccount.id, data: currentCrmData() });
+  }, 2500);
+}
+
+// Rejoue sur les données en mémoire des modifications gardées hors ligne.
+function applyPayloadLocally(payload) {
+  const lists = crmCollections();
+  Object.entries(payload.changes || {}).forEach(([name, change]) => {
+    const list = lists[name];
+    if (!list) return;
+    (change.remove || []).forEach(id => { const i = list.findIndex(x => String(x.id) === String(id)); if (i >= 0) list.splice(i, 1); });
+    [...(change.upsert || [])].reverse().forEach(item => {
+      const i = list.findIndex(x => String(x.id) === String(item.id));
+      if (i >= 0) list[i] = item; else list.unshift(item);
+    });
+  });
+  if (payload.replace && Object.keys(payload.replace).length) applyCrmData(payload.replace, true);
+  if (payload.meta?.holidayNotes) holidayNotes = payload.meta.holidayNotes;
+}
+
+// Au démarrage : s'il reste des modifications faites sans réseau lors d'une
+// session précédente, on les envoie avant de charger les données du serveur.
+async function flushPendingSync() {
+  const pending = await idbGet("pending");
+  if (!pending || !pending.payload) return;
+  if (pending.accountId !== currentAccount?.id) { idbDel("pending"); return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/sync`, {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(pending.payload),
+    });
+    if (res.ok) { await idbDel("pending"); notify("Modifications faites hors ligne envoyées au serveur"); }
+    else if (res.status === 403 || res.status === 400) await idbDel("pending");
+  } catch { /* toujours hors ligne : on réessaiera */ }
+}
+
+// La version du serveur devient la référence : données en mémoire, photo de
+// synchronisation et numéro de révision.
+function applyServerState(server) {
+  syncSnapshot = snapshotOf(server);
+  syncRev = Number(server.rev || 0);
+  applyCrmData(server, true);
+  normalizeLoadedData();
+  scheduleLocalBackup();
+}
+
+function userIsTyping() {
+  const el = document.activeElement;
+  return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !!el.closest("#content, #drawer");
+}
+
+// Récupère les changements faits par d'autres personnes. Abandonne si une
+// modification locale est partie (ou en train de partir) pendant le
+// téléchargement : on ne remplace jamais des données plus récentes que celles
+// qu'on vient de recevoir ; la vérification suivante s'en chargera.
+async function pullFromServer() {
+  if (saveInFlight || !syncSnapshot) return;
+  if (buildSyncPayload().count) { saveCrmData({ silent: true }); return; }
+  const seq = saveSeq;
+  const server = await apiGetState();
+  if (!server || saveInFlight || seq !== saveSeq) return;
+  applyServerState(server);
+  if (userIsTyping() || dialog().open) state.pendingRender = true; else render();
+}
+async function pullIfStale() {
+  if (!authToken || !currentAccount || saveInFlight) return;
+  if (!syncSnapshot) {
+    // Démarrage sans réseau ni copie locale : on retente le chargement.
+    const server = await apiGetState();
+    if (server) { applyServerState(server); render(); setSaveIndicator("Connexion rétablie", "ok"); }
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/rev`, { headers: authHeaders(), cache: "no-store" });
+    if (res.status === 401) { handleUnauthorized(); return; }
+    if (!res.ok) return;
+    const { rev } = await res.json();
+    if (rev !== syncRev) await pullFromServer();
+    else if (buildSyncPayload().count) saveCrmData({ silent: true });
+  } catch { /* hors ligne : on réessaiera */ }
+}
+
 // Après un refus du serveur, la copie locale contient des modifications qui
 // n'existent pas côté serveur : on la remplace par la vraie version, pour
-// ne pas laisser à l'écran (et dans la sauvegarde locale) un contact ou un
-// don "fantôme" qui disparaîtrait au prochain rechargement.
+// ne pas laisser à l'écran un contact ou un don "fantôme" qui disparaîtrait
+// au prochain rechargement.
 async function revertToServerState() {
   const server = await apiGetState();
   if (!server) return;
-  applyCrmData(server, true);
-  saveLocalBackup(currentCrmData());
+  applyServerState(server);
   render();
 }
 
@@ -348,7 +545,7 @@ function isReadOnlyAccount() {
 // Actions qui modifient des données : masquées pour un compte Lecture seule
 // (body.read-only, voir styles.css) et bloquées ici par sécurité si l'une
 // d'elles reste atteignable.
-const WRITE_ACTION_RE = /^(add-|delete-|edit-|quick-|dedupe-(delete|merge|separate)|toggle-task|toggle-portfolio|portfolio-touch|generate-receipts|regenerate-receipt|import-new|save-segment|holiday-prepare)/;
+const WRITE_ACTION_RE = /^(add-|delete-|edit-|quick-|bulk-(tag|portfolio|delete)|mark-received|archive-campaign|dedupe-(delete|merge|separate)|toggle-task|toggle-portfolio|portfolio-touch|generate-receipts|regenerate-receipt|import-new|save-segment|holiday-prepare)/;
 
 // Compte à accès restreint par catégorie : le serveur n'enregistre que les
 // fiches portant une de ses étiquettes/segments/groupes. Une fiche créée
@@ -365,7 +562,7 @@ function ensureInAccountScope(record) {
 }
 
 function logAudit(text) {
-  auditLog.unshift({ id: `AUD-${Date.now().toString(36)}`, date: todayStr(), at: nowIso(), text, user: currentUserLabel() });
+  auditLog.unshift({ id: `AUD-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, date: todayStr(), at: nowIso(), text, user: currentUserLabel() });
   if (auditLog.length > AUDIT_LIMIT) auditLog.length = AUDIT_LIMIT;
 }
 
@@ -373,13 +570,15 @@ function logAudit(text) {
 
 const state = {
   view: "home",
-  section: "ACCUEIL",
+  section: "Accueil",
   query: "",
   selectedRecord: null,
   tab: "Details",
   drawer: null,
   toastTimer: null,
-  showDetail: true,
+  // showDetail : la fiche d'un contact est ouverte en pleine page (ordinateur
+  // comme téléphone). mobileDetailOpen suit toujours la même valeur.
+  showDetail: false,
   navOpen: false,
   booted: false,
   recordsPage: 80,
@@ -398,6 +597,19 @@ const state = {
   // Filtres avancés du répertoire (Contacts/Structures) : voir defaultFilters()
   // pour le détail des critères, et recordMatchesFilters() pour leur application.
   filters: null,
+  // Répertoire : filtre rapide (pastilles au-dessus de la liste), tri, et
+  // fiches cochées pour une action groupée.
+  quick: "",
+  sort: { key: "recent", dir: "desc" },
+  selection: new Set(),
+  // Paiements : filtres de la liste et tri.
+  payFilters: { type: "", year: "", status: "", method: "" },
+  // Tâches : "mine" (les miennes) ou "all" (toute l'équipe).
+  taskScope: "mine",
+  statsYear: "",
+  auditQuery: "",
+  interactionFilter: "",
+  pendingRender: false,
 };
 
 const PAGE_STEP = 80;
@@ -418,6 +630,8 @@ function defaultFilters() {
     occasions: [], // valeurs libres de payment.occasion (vide dans les données historiques)
     payStatus: [], // sous-ensemble de ["paye", "attente"]
     segments: [], // étiquettes de record.segments (segments "historiques" en texte libre)
+    tags: [], // étiquettes de la fiche (record.tags)
+    lastGift: "", // "" | "12m" (a donné depuis 12 mois) | "old" (dernier don il y a plus de 12 mois) | "never"
   };
 }
 function activeFilters() {
@@ -425,11 +639,11 @@ function activeFilters() {
   return state.filters;
 }
 function filtersAreActive(f) {
-  return !!(f.amountMin || f.amountMax || f.recurring || f.campuses.length || f.years.length || f.paymentTypes.length || f.occasions.length || f.payStatus.length || f.segments.length);
+  return !!(f.amountMin || f.amountMax || f.recurring || f.lastGift || f.campuses.length || f.years.length || f.paymentTypes.length || f.occasions.length || f.payStatus.length || f.segments.length || (f.tags || []).length);
 }
 function activeFilterCount(f) {
-  return [f.amountMin, f.amountMax, f.recurring].filter(Boolean).length
-    + f.campuses.length + f.years.length + f.paymentTypes.length + f.occasions.length + f.payStatus.length + f.segments.length;
+  return [f.amountMin, f.amountMax, f.recurring, f.lastGift].filter(Boolean).length
+    + f.campuses.length + f.years.length + f.paymentTypes.length + f.occasions.length + f.payStatus.length + f.segments.length + (f.tags || []).length;
 }
 const PAYMENT_TYPE_OPTIONS = ["Don", "Adhésion", "Billetterie"];
 const CAMPUS_OPTIONS = ["Beth Mena'hem", "Beth Hilel"];
@@ -483,6 +697,10 @@ let receiptLog = [];
 // "phone:0601020304") est ajoutée ici pour que ce groupe ne réapparaisse
 // plus jamais dans l'onglet Doublons, même si l'email/téléphone reste identique.
 let dismissedDuplicates = [];
+// Campagnes de collecte : { id, name, goal, startDate, endDate, note, archived }.
+// Un don est rattaché à une campagne quand son "occasion" porte le nom de la
+// campagne — la saisie reste donc un simple champ Occasion.
+let campaigns = [];
 
 const apps = [
   ["HelloAsso", "Collecter"], ["Stripe", "Collecter"], ["GoCardless", "Collecter"], ["iRaiser", "Collecter"],
@@ -490,26 +708,33 @@ const apps = [
   ["Google Calendar", "Recruter"], ["Gravity Forms", "Recruter"], ["Pennylane", "Comptabilité"], ["Zapier", "Possibilités infinies"],
 ];
 
+// [identifiant de vue, libellé, sous-pages, icône]
 const navTree = [
-  ["home", "ACCUEIL", []],
-  ["stats", "STATS", ["Vue d'ensemble"]],
-  ["crm", "CONTACTS", ["Contacts", "Structures", "Interactions", "Segments", "Groupes", "Liaisons", "Portefeuille", "Anniversaires"]],
-  ["pay", "PAIEMENTS", ["Tous les paiements", "Dons", "Adhésions", "Billetterie", "Reçus"]],
-  ["imports", "IMPORTS", []],
-  ["apps", "APPLIS", ["Toutes les applis"]],
-  ["settings", "PARAMÈTRES", ["Champs personnalisés", "Catégories d'interaction", "Reçus"]],
-  ["admin", "ADMINISTRATION", ["Utilisateurs", "Journal d'activité"]],
+  ["home", "Tableau de bord", [], "home"],
+  ["crm", "Contacts", ["Contacts", "Structures", "Segments", "Groupes", "Liaisons"], "users"],
+  ["follow", "Suivi", ["Tâches", "Interactions", "Portefeuille", "Anniversaires"], "tasks"],
+  ["pay", "Collecte", ["Tous les paiements", "Promesses", "Campagnes", "Reçus"], "heart"],
+  ["stats", "Statistiques", [], "chart"],
+  ["imports", "Imports", [], "upload"],
+  ["settings", "Paramètres", ["Mon compte", "Champs personnalisés", "Catégories d'interaction", "Intégrations"], "settings"],
+  ["admin", "Administration", ["Utilisateurs", "Journal d'activité"], "shield"],
 ];
+const DEFAULT_SECTIONS = { home: "Accueil", stats: "Vue d'ensemble", imports: "Imports" };
+function defaultSection(view) {
+  const entry = navTree.find(([id]) => id === view);
+  return (entry && entry[2][0]) || DEFAULT_SECTIONS[view] || "Accueil";
+}
 
+// Sert aussi à valider une adresse de page (voir applyHash dans app-tools.js).
 const titles = {
-  home: ["Accueil", "Vue générale du CRM Sinaï"],
-  stats: ["Stats", "Chiffres réels de la collecte et des contacts"],
-  crm: ["Contacts", "Contacts, structures, interactions, segments, groupes et liaisons"],
-  pay: ["Paiements", "Dons, adhésions, billetterie et reçus"],
-  imports: ["Imports", "Historique des imports de contacts"],
-  apps: ["Applis", "Connexions externes"],
-  settings: ["Paramètres", "Champs personnalisés et reçus fiscaux"],
-  admin: ["Administration", "Utilisateurs et journal d'activité"],
+  home: ["Tableau de bord", ""],
+  crm: ["Contacts", ""],
+  follow: ["Suivi", ""],
+  pay: ["Collecte", ""],
+  stats: ["Statistiques", ""],
+  imports: ["Imports", ""],
+  settings: ["Paramètres", ""],
+  admin: ["Administration", ""],
 };
 
 function seedFromImportedContacts() {
@@ -545,7 +770,7 @@ function seedFromImportedContacts() {
     duplicates: 0,
     rejected: 0,
   }] : [];
-  users = [{ email: "pevznerarie@gmail.com", first: "Arié", last: "Pevzner", profile: "Administrateur", lastSeen: "Aujourd'hui" }];
+  users = [];
   groups = [];
   linkages = [];
   auditLog = importedContacts.length ? [{ id: "AUD-seed", date: todayStr(), at: nowIso(), text: `Import initial de ${importedContacts.length} contacts.`, user: "Système" }] : [];
@@ -571,6 +796,10 @@ let recordYearsIndex = new Map();
 let recordOccasionsIndex = new Map();
 let recordPaymentTypesIndex = new Map();
 let recordPayStatusIndex = new Map();
+// Par fiche : { received, thisYear, lastYear, pending, count, lastIso, firstIso }
+// (montants réellement reçus, promesses en cours, dates du premier/dernier don).
+let recordMetricsIndex = new Map();
+const EMPTY_METRICS = Object.freeze({ received: 0, thisYear: 0, lastYear: 0, pending: 0, count: 0, lastIso: "", firstIso: "" });
 
 function rebuildIndexes() {
   recordsIndex = new Map(records.map(r => [r.id, r]));
@@ -579,10 +808,26 @@ function rebuildIndexes() {
   recordOccasionsIndex = new Map();
   recordPaymentTypesIndex = new Map();
   recordPayStatusIndex = new Map();
+  recordMetricsIndex = new Map();
+  const thisYear = String(new Date().getFullYear());
+  const lastYear = String(new Date().getFullYear() - 1);
   payments.forEach(p => {
     if (!p.recordId) return;
     if (!paymentsIndex.has(p.recordId)) paymentsIndex.set(p.recordId, []);
     paymentsIndex.get(p.recordId).push(p);
+    let m = recordMetricsIndex.get(p.recordId);
+    if (!m) { m = { received: 0, thisYear: 0, lastYear: 0, pending: 0, count: 0, lastIso: "", firstIso: "" }; recordMetricsIndex.set(p.recordId, m); }
+    const got = paymentReceivedAmount(p);
+    if (paymentIsPending(p)) m.pending += Math.max(0, paymentRemaining(p));
+    if (got > 0) {
+      const iso = paymentIso(p);
+      m.received += got;
+      m.count += 1;
+      if (iso.startsWith(thisYear)) m.thisYear += got;
+      else if (iso.startsWith(lastYear)) m.lastYear += got;
+      if (iso && iso > m.lastIso) m.lastIso = iso;
+      if (iso && (!m.firstIso || iso < m.firstIso)) m.firstIso = iso;
+    }
     const year = paymentYear(p);
     if (year) {
       if (!recordYearsIndex.has(p.recordId)) recordYearsIndex.set(p.recordId, new Set());
@@ -600,7 +845,7 @@ function rebuildIndexes() {
     if (!recordPayStatusIndex.has(p.recordId)) recordPayStatusIndex.set(p.recordId, new Set());
     recordPayStatusIndex.get(p.recordId).add(paymentPayStatus(p));
   });
-  paymentsIndex.forEach(list => list.sort((a, b) => (b.at || "").localeCompare(a.at || "")));
+  paymentsIndex.forEach(list => list.sort((a, b) => paymentSortKey(b).localeCompare(paymentSortKey(a))));
   interactionsIndex = new Map();
   interactions.forEach(i => {
     if (!i.recordId) return;
@@ -623,8 +868,12 @@ function recordLiveInteractions(recordId) {
   return interactionsIndex.get(recordId) || [];
 }
 
+// Total réellement donné : historique importé avant le CRM + ce qui a
+// effectivement été reçu depuis (un don promis mais pas encore versé, ou un
+// paiement qui a échoué, n'est pas compté — la part déjà versée d'une
+// promesse échelonnée, si).
 function recordTotalAmount(r) {
-  return Number(r.importedAmount || 0) + recordLivePayments(r.id).reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  return Number(r.importedAmount || 0) + recordMetrics(r).received;
 }
 function recordPaymentsCount(r) {
   return Number(r.importedPaymentsCount || 0) + recordLivePayments(r.id).length;
@@ -682,6 +931,93 @@ function recordPaymentTypes(r) {
 }
 function recordPayStatuses(r) {
   return [...(recordPayStatusIndex.get(r.id) || [])];
+}
+function recordMetrics(r) {
+  return recordMetricsIndex.get(r.id) || EMPTY_METRICS;
+}
+
+// Date d'un paiement au format AAAA-MM-JJ, quelle que soit son origine : date
+// de paiement réelle si reçu, sinon date de la promesse, sinon l'ancienne
+// date de saisie des imports ("JJ/MM/AAAA").
+function paymentIso(p) {
+  if (p.status === "Reçu" && p.paymentDate) return String(p.paymentDate).slice(0, 10);
+  if (p.promiseDate) return String(p.promiseDate).slice(0, 10);
+  const m = String(p.date || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  return String(p.at || "").slice(0, 10);
+}
+function paymentSortKey(p) {
+  return `${paymentIso(p)}|${p.at || ""}`;
+}
+function paymentIsPending(p) {
+  return PENDING_PAYMENT_STATUSES.has(p.status);
+}
+// Paiement qui n'a pas abouti (statuts historiques : "Paiement non effectué",
+// annulé, rejeté, remboursé...) : ni une rentrée, ni une promesse en cours.
+function paymentIsFailed(p) {
+  return /non effectu|annul|rejet|rembours|[ée]chou|refus/i.test(p.status || "");
+}
+// Ce qui est réellement arrivé pour ce paiement : tout le montant s'il est
+// reçu, seulement les versements déjà faits s'il est encore en attente.
+function paymentReceivedAmount(p) {
+  if (paymentIsFailed(p)) return 0;
+  if (paymentIsPending(p)) return Math.min(paymentPaidTotal(p), Number(p.amount || 0));
+  return Number(p.amount || 0);
+}
+// Où en est la relation avec ce donateur, d'un coup d'œil.
+function donorStage(r) {
+  const m = recordMetrics(r);
+  const year = String(new Date().getFullYear());
+  if (m.thisYear > 0) {
+    if (m.firstIso.startsWith(year) && !Number(r.importedAmount || 0)) return { key: "new", label: "Nouveau donateur", tone: "blue" };
+    return { key: "active", label: recordIsRecurring(r) ? "Fidèle" : "Actif", tone: "ok" };
+  }
+  if (m.lastYear > 0) return { key: "lapsed", label: "À relancer", tone: "warn" };
+  if (m.pending > 0) return { key: "pledge", label: "Promesse en cours", tone: "violet" };
+  if (m.count > 0 || Number(r.importedAmount || 0) > 0) return { key: "inactive", label: "Ancien donateur", tone: "" };
+  return null;
+}
+function distinctTags() {
+  const counts = new Map();
+  records.forEach(r => (r.tags || []).forEach(t => counts.set(t, (counts.get(t) || 0) + 1)));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "fr")).map(([t]) => t);
+}
+// Une liaison désigne ses deux fiches par identifiant ; les liaisons créées
+// avant ne portaient que les noms, qu'on retrouve alors par le nom.
+function linkageSide(l, side) {
+  const id = l[`${side}Id`];
+  return (id && recordById(id)) || records.find(r => r.name === l[side]) || null;
+}
+function recordLinkages(r) {
+  return linkages.filter(l => linkageSide(l, "a") === r || linkageSide(l, "b") === r);
+}
+// Supprime des fiches et tout ce qui leur est rattaché (dons, interactions,
+// tâches, liaisons). Renvoie une fonction qui annule la suppression.
+function removeRecords(ids) {
+  const gone = {
+    records: records.filter(r => ids.has(r.id)),
+    payments: payments.filter(p => ids.has(p.recordId)),
+    interactions: interactions.filter(i => ids.has(i.recordId)),
+    tasks: tasks.filter(t => ids.has(t.recordId)),
+    linkages: linkages.filter(l => ids.has(l.aId) || ids.has(l.bId)),
+  };
+  records = records.filter(r => !ids.has(r.id));
+  payments = payments.filter(p => !ids.has(p.recordId));
+  interactions = interactions.filter(i => !ids.has(i.recordId));
+  tasks = tasks.filter(t => !ids.has(t.recordId));
+  linkages = linkages.filter(l => !(ids.has(l.aId) || ids.has(l.bId)));
+  ids.forEach(id => state.selection.delete(id));
+  return () => {
+    records = [...gone.records, ...records];
+    payments = [...gone.payments, ...payments];
+    interactions = [...gone.interactions, ...interactions];
+    tasks = [...gone.tasks, ...tasks];
+    linkages = [...gone.linkages, ...linkages];
+    logAudit(`Suppression annulée : ${gone.records.map(r => r.name || r.id).slice(0, 3).join(", ")}${gone.records.length > 3 ? "…" : ""}.`);
+    saveCrmData();
+    render();
+    notify("Suppression annulée");
+  };
 }
 
 /* ---------- 4bis. Détection des doublons (même email / même téléphone) --- */
@@ -766,15 +1102,17 @@ function isRecordDuplicated(id) {
   return recordDuplicateGroups(id).length > 0;
 }
 
+// Identifiant d'un nouvel élément : numéro à la suite du plus grand existant,
+// suivi de deux caractères tirés au hasard (ex : C-1204K7). Depuis que
+// plusieurs personnes peuvent enregistrer en même temps, deux navigateurs
+// pouvaient sinon attribuer le même numéro à deux fiches différentes, et la
+// seconde aurait remplacé la première.
 function nextId(prefix, list) {
-  const numbers = list
-    .map(item => String(item.id || ""))
-    .filter(id => id.startsWith(`${prefix}-`))
-    .map(id => id.split("-").pop())
-    .map(Number)
-    .filter(Number.isFinite);
-  const next = (numbers.length ? Math.max(...numbers) : 1000) + 1;
-  return `${prefix}-${String(next).padStart(4, "0")}`;
+  const re = new RegExp(`^${prefix}-(\\d+)`);
+  let max = 1000;
+  list.forEach(item => { const m = re.exec(String(item.id || "")); if (m) max = Math.max(max, Number(m[1])); });
+  const suffix = Math.random().toString(36).slice(2, 4).toUpperCase().padEnd(2, "X");
+  return `${prefix}-${String(max + 1).padStart(4, "0")}${suffix}`;
 }
 
 function splitTags(value) {
@@ -854,8 +1192,8 @@ function categoryField(value) {
 }
 function wireCategoryAdders(root) {
   root.querySelectorAll("[data-add-category-inline]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const name = (window.prompt("Nom de la nouvelle catégorie (ex : Chiour)") || "").trim();
+    btn.addEventListener("click", async () => {
+      const name = await uiPrompt("Nom de la nouvelle catégorie", "", { title: "Nouvelle catégorie", placeholder: "Ex : Chiour" });
       if (!name) return;
       if (!interactionCategories.some(c => c.toLowerCase() === name.toLowerCase())) {
         interactionCategories.push(name);
@@ -982,7 +1320,7 @@ async function submitAccountForm(form) {
 async function deleteAccount(id) {
   const acc = accounts.find(a => a.id === id);
   if (!acc) return;
-  if (!window.confirm(`Supprimer le compte de ${acc.email} ? Cette action est irréversible.`)) return;
+  if (!await uiConfirm(`Supprimer le compte de ${acc.email} ? Cette personne ne pourra plus se connecter.`, { title: "Supprimer le compte", danger: true, okLabel: "Supprimer" })) return;
   try {
     await apiDeleteAccount(id);
     logAudit(`Compte supprimé : ${acc.email}.`);
@@ -1022,9 +1360,9 @@ function wirePickers(root) {
     const hidden = root.querySelector(`[data-picker-value="${key}"]`);
     const results = root.querySelector(`[data-picker-results="${key}"]`);
     const showResults = (term) => {
-      const q = term.trim().toLowerCase();
+      const q = normalizeSearchText(term).trim();
       let list = records;
-      if (q) list = records.filter(r => (r.name || "").toLowerCase().includes(q) || (r.email || "").toLowerCase().includes(q));
+      if (q) list = records.filter(r => normalizeSearchText(r.name).includes(q) || normalizeSearchText(r.email).includes(q));
       list = list.slice(0, 8);
       results.innerHTML = list.length
         ? list.map(r => `<button type="button" class="picker-result" data-pick="${r.id}">${escapeHtml(r.name)}<span>${r.kind}${r.email ? " · " + escapeHtml(r.email) : ""}</span></button>`).join("")
@@ -1052,17 +1390,20 @@ function wirePickers(root) {
     // focus au premier tap (modalShell le fait à l'ouverture de la modale),
     // "focus" ne se redéclenche pas aux clics suivants, alors que "click" si.
     const selectAllSoon = () => setTimeout(() => input.select(), 0);
-    input.addEventListener("focus", () => { selectAllSoon(); showResults(input.value); });
+    // La liste ne s'ouvre d'elle-même que si aucun contact n'est encore
+    // choisi : sinon elle recouvrait les champs suivants dès l'ouverture du
+    // formulaire (le premier champ reçoit le focus automatiquement).
+    input.addEventListener("focus", () => { selectAllSoon(); if (!hidden.value) showResults(input.value); });
     input.addEventListener("click", selectAllSoon);
     input.addEventListener("input", () => { hidden.value = ""; showResults(input.value); });
     input.addEventListener("blur", () => setTimeout(() => results.classList.remove("open"), 120));
   });
   root.querySelectorAll("[data-picker-create]").forEach(btn => {
     const key = btn.dataset.pickerCreate;
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       const input = root.querySelector(`[data-picker-input="${key}"]`);
       const hidden = root.querySelector(`[data-picker-value="${key}"]`);
-      const name = (window.prompt("Nom du nouveau contact (ex : Prénom Nom)", input ? input.value.trim() : "") || "").trim();
+      const name = await uiPrompt("Prénom et nom du nouveau contact", input ? input.value.trim() : "", { title: "Nouveau contact", placeholder: "Prénom Nom", okLabel: "Créer" });
       if (!name) return;
       const rec = quickCreateContact(name);
       if (!rec) return;
@@ -1085,13 +1426,17 @@ const dialogContent = () => document.querySelector("#dialogContent");
 const drawerEl = () => document.querySelector("#drawer");
 const toastEl = () => document.querySelector("#toast");
 
-function notify(message, warn = false) {
+// action (facultatif) : { label, run } ajoute un bouton dans le message, par
+// exemple "Annuler" après une suppression ou "Voir la fiche" après un ajout.
+function notify(message, warn = false, action = null) {
   const toast = toastEl();
-  toast.textContent = message;
+  toast.innerHTML = `<span>${escapeHtml(message)}</span>${action ? `<button type="button" class="toast-action">${escapeHtml(action.label)}</button>` : ""}`;
   toast.classList.toggle("warn", !!warn);
+  toast.classList.toggle("has-action", !!action);
   toast.classList.add("show");
+  if (action) toast.querySelector("button").onclick = () => { toast.classList.remove("show"); action.run(); };
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => toast.classList.remove("show"), warn ? 6000 : 2600);
+  state.toastTimer = setTimeout(() => toast.classList.remove("show"), warn ? 6000 : action ? 7000 : 2600);
 }
 
 /* ---------- 6. Rendu des vues -------------------------------------------- */
@@ -1114,164 +1459,98 @@ function recordMatchesFilters(r, f) {
   if (f.occasions.length && !recordOccasions(r).some(o => f.occasions.includes(o))) return false;
   if (f.payStatus.length && !recordPayStatuses(r).some(s => f.payStatus.includes(s))) return false;
   if (f.segments.length && !(r.segments || []).some(s => f.segments.includes(s))) return false;
+  if ((f.tags || []).length && !(r.tags || []).some(t => f.tags.includes(t))) return false;
+  if (f.lastGift) {
+    const last = recordMetrics(r).lastIso;
+    const cutoff = addDaysIso(todayIso(), -365);
+    if (f.lastGift === "12m" && !(last && last >= cutoff)) return false;
+    if (f.lastGift === "old" && !(last && last < cutoff)) return false;
+    if (f.lastGift === "never" && (last || Number(r.importedAmount || 0) > 0)) return false;
+  }
   return true;
 }
-// queryOverride/filtersOverride permettent de recalculer le nombre de fiches
-// correspondant à un segment enregistré (segmentMatchCount) sans toucher à
-// l'état global affiché (state.query/state.filters) pendant qu'on construit
-// la page Segments.
-function filteredRecords(queryOverride, filtersOverride) {
-  const q = (queryOverride !== undefined ? queryOverride : state.query).toLowerCase();
-  const f = filtersOverride !== undefined ? filtersOverride : activeFilters();
-  return records.filter(r =>
-    (!q || [r.id, r.kind, r.name, r.email, r.phone, r.address, r.city, ...(r.tags || []), ...(r.groups || [])].join(" ").toLowerCase().includes(q))
-    && recordMatchesFilters(r, f)
-  );
+// Filtres rapides (pastilles au-dessus du répertoire).
+const QUICK_FILTERS = [["", "Tous"], ["donors", "Donateurs"], ["new", "Nouveaux cette année"], ["lapsed", "À relancer"], ["pledge", "Promesses en cours"], ["mine", "Mon portefeuille"], ["noemail", "Sans email"]];
+function recordMatchesQuick(r, quick) {
+  if (!quick) return true;
+  const m = recordMetrics(r);
+  if (quick === "donors") return recordTotalAmount(r) > 0;
+  if (quick === "new") return donorStage(r)?.key === "new";
+  if (quick === "lapsed") return m.lastYear > 0 && m.thisYear === 0;
+  if (quick === "pledge") return m.pending > 0;
+  if (quick === "mine") return isInMyPortfolio(r);
+  if (quick === "noemail") return !r.email;
+  return true;
 }
-function filteredPayments(type) {
-  const q = state.query.toLowerCase();
-  return payments.filter(p => (!type || p.type === type) && (!q || Object.values(p).join(" ").toLowerCase().includes(q)))
-    .sort((a, b) => (b.at || "").localeCompare(a.at || ""));
+// Recherche sans tenir compte des accents ni de la casse ; plusieurs mots
+// doivent tous être présents ; une suite de chiffres est aussi comparée aux
+// téléphones sans espaces ni points.
+function recordMatchesQuery(r, terms, digits) {
+  if (!terms.length) return true;
+  const hay = normalizeSearchText([r.name, r.email, r.secondaryEmails, r.phone, r.phone2, r.address, r.zip, r.city, r.family, r.id, ...(r.tags || []), ...(r.groups || [])].join(" "));
+  if (terms.every(t => hay.includes(t))) return true;
+  return digits.length >= 4 && `${r.phone || ""} ${r.phone2 || ""}`.replace(/\D/g, "").includes(digits);
+}
+function filteredRecords(queryOverride, filtersOverride) {
+  const raw = queryOverride !== undefined ? queryOverride : state.query;
+  const terms = normalizeSearchText(raw).split(/\s+/).filter(Boolean);
+  const digits = String(raw).replace(/\D/g, "");
+  const f = filtersOverride !== undefined ? filtersOverride : activeFilters();
+  const quick = queryOverride === undefined && filtersOverride === undefined ? state.quick : "";
+  return records.filter(r => recordMatchesQuery(r, terms, digits) && recordMatchesFilters(r, f) && recordMatchesQuick(r, quick));
+}
+// Liste du répertoire, filtrée puis triée selon l'en-tête de colonne choisi.
+function sortedRecords(kind) {
+  const rows = filteredRecords().filter(r => !kind || r.kind === kind);
+  const { key, dir } = state.sort;
+  if (key === "recent") return rows;
+  const sign = dir === "asc" ? 1 : -1;
+  const value = {
+    name: r => normalizeSearchText(r.kind === "Structure" ? r.name : `${r.last || ""} ${r.first || ""} ${r.name || ""}`),
+    total: r => recordTotalAmount(r),
+    last: r => recordMetrics(r).lastIso,
+    year: r => recordMetrics(r).thisYear,
+  }[key] || (r => r.name || "");
+  return [...rows].sort((a, b) => {
+    const va = value(a), vb = value(b);
+    if (va === vb) return 0;
+    if (va === "" || va === 0) return 1;
+    if (vb === "" || vb === 0) return -1;
+    return (va < vb ? -1 : 1) * sign;
+  });
+}
+function filteredPayments() {
+  const terms = normalizeSearchText(state.query).split(/\s+/).filter(Boolean);
+  const pf = state.payFilters;
+  return payments.filter(p => {
+    if (pf.type && p.type !== pf.type) return false;
+    if (pf.year && !paymentIso(p).startsWith(pf.year)) return false;
+    if (pf.method && p.method !== pf.method) return false;
+    if (pf.status === "recu" && (paymentIsPending(p) || paymentIsFailed(p))) return false;
+    if (pf.status === "attente" && !paymentIsPending(p)) return false;
+    if (pf.status === "echec" && !paymentIsFailed(p)) return false;
+    if (!terms.length) return true;
+    const hay = normalizeSearchText([p.payer, p.email, p.type, p.status, p.method, p.receiptNumber, p.amount, ...(p.occasion || [])].join(" "));
+    return terms.every(t => hay.includes(t));
+  }).sort((a, b) => paymentSortKey(b).localeCompare(paymentSortKey(a)));
 }
 function currentRows() {
-  if (state.view === "pay") return filteredPayments({ Dons: "Don", Adhésions: "Adhésion", Billetterie: "Billetterie" }[state.section]);
+  if (state.view === "pay") return filteredPayments();
   if (state.view === "imports") return imports;
-  if (state.view === "admin") return accounts;
-  if (state.view === "settings") return customFields;
+  if (state.view === "admin") return state.section === "Journal d'activité" ? auditLog : accounts;
+  if (state.view === "follow" && state.section === "Interactions") return interactions;
+  if (state.view === "crm" && state.section === "Groupes") return groups;
+  if (state.view === "crm" && state.section === "Liaisons") return linkages;
   return filteredRecords();
 }
 
-function renderNav() {
-  const isAdmin = currentAccount && currentAccount.profile === "Administrateur";
-  const visibleTree = navTree.filter(([id]) => id !== "admin" || isAdmin);
-  nav().innerHTML = visibleTree.map(([id, label, children]) => `
-    <div class="nav-group">
-      <button class="nav-btn ${state.view === id ? "active" : ""}" data-view="${id}" data-section="${children[0] || label}">
-        <span>${label}</span>
-      </button>
-      ${children.length ? `<div class="subnav">${children.map(child => `<button class="subnav-btn ${state.section === child ? "current" : ""}" data-view="${id}" data-section="${child}">${child}</button>`).join("")}</div>` : ""}
-    </div>`).join("");
-}
 
-function setHeader() {
-  const [title, subtitle] = titles[state.view];
-  viewTitle().textContent = state.section === title.toUpperCase() ? title : state.section;
-  viewSubtitle().textContent = subtitle;
-  // Sur l'Accueil, ce bandeau générique ("Accueil" / "Vue générale...") ne
-  // sert à rien : la page a déjà son propre en-tête juste en dessous
-  // ("Bonjour, ..."), avec la date et les actions rapides. On ne le masque
-  // que pour cette page — les autres vues (Contacts, Paiements...) n'ont pas
-  // de gros titre à elles et en ont toujours besoin.
-  const topbarEl = document.querySelector(".topbar");
-  if (topbarEl) topbarEl.classList.toggle("topbar-hidden", state.view === "home");
-  // Doublons/Importer ne concernent que les fiches, Exporter que les listes
-  // de fiches et de paiements : on ne les montre que là, au lieu de les
-  // laisser sur toutes les pages (un "Exporter" depuis Paramètres
-  // téléchargeait la dernière liste consultée, sans rapport avec l'écran).
-  const onRecords = state.view === "crm" && ["Contacts", "Structures"].includes(state.section);
-  const onPayments = state.view === "pay" && state.section !== "Reçus";
-  document.querySelector("#dupBtn")?.toggleAttribute("hidden", !onRecords);
-  document.querySelector("#importBtn")?.toggleAttribute("hidden", !onRecords);
-  document.querySelector("#exportBtn")?.toggleAttribute("hidden", !(onRecords || onPayments));
-}
 
 function metric(label, value, note) {
   return `<div class="metric"><span class="eyebrow">${label}</span><strong>${value}</strong><p>${note}</p></div>`;
 }
 
-function toolbar(placeholder = "Rechercher un nom, un email ou une ville") {
-  return `<div class="toolbar">
-    <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="${placeholder}" autocapitalize="off" autocorrect="off" spellcheck="false" />
-    <div class="row-actions">
-      ${action("Réinitialiser", "reset-filters")}
-      ${action("Actions", "open-actions")}
-    </div>
-  </div>`;
-}
 
-function home() {
-  const totalDons = records.reduce((s, r) => s + recordTotalAmount(r), 0) || payments.reduce((s, p) => s + Number(p.amount || 0), 0);
-  const missingEmail = records.filter(r => !r.email).length;
-  // Un don et une promesse sont la même chose, juste à un stade différent :
-  // le Statut ("Reçu" / "Promis") porte toute la distinction, il n'y a plus
-  // de Type "Promesse" séparé. "Reste à payer" ne compte donc que les
-  // paiements explicitement marqués "Promis" par l'appli — jamais les dons
-  // historiques importés, dont les statuts très divers ("Paiement validé",
-  // "Chèque encaissé"...) ne s'écrivent jamais littéralement "Promis" (les
-  // inclure ferait passer presque tout l'historique pour "restant à payer").
-  // Tient compte des versements déjà reçus sur un paiement échelonné : un
-  // don promis de 7 700 € dont 5 000 € sont déjà arrivés ne compte plus que
-  // pour 2 700 € restants, pas pour son montant d'origine.
-  // Les ~11 000 paiements importés avant le CRM n'utilisent jamais le statut
-  // littéral "Promis" (c'est un statut propre à l'appli) : ils portent des
-  // statuts historiques variés. On compte comme "en attente" les trois qui
-  // indiquent sans ambiguïté une promesse pas encore encaissée ("En attente
-  // d'envoi/de traitement/d'autorisation") — jamais "Paiement validé" ou
-  // "Chèque encaissé" (déjà reçus), ni "Paiement non effectué" (un paiement
-  // qui a échoué n'est pas une rentrée à venir).
-  const outstanding = payments.filter(p => PENDING_PAYMENT_STATUSES.has(p.status) && paymentRemaining(p) > 0);
-  const outstandingAmount = outstanding.reduce((s, p) => s + paymentRemaining(p), 0);
-  const lateTasks = tasks.filter(t => t.status !== "fait" && t.dueDate && t.dueDate < todayIso());
-  const recentInteractions = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")).slice(0, 6);
-  const now = new Date();
-  const greetHour = now.getHours();
-  const greetWord = greetHour < 5 ? "Bonsoir" : greetHour < 12 ? "Bonjour" : greetHour < 18 ? "Bon après-midi" : "Bonsoir";
-  const greetName = currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
-  const todayLabel = now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
-  return `
-    <div class="home-premium">
-      <!-- Logo seulement sur mobile, où la barre latérale (qui l'affiche
-           déjà avec l'accroche) est cachée : voir .hp-brand-row. -->
-      <div class="hp-brand-row">
-        <img class="hp-brand-logo" src="./assets/logo-sinai.png" alt="Sinaï">
-      </div>
-      <div class="hp-topline">
-        <span class="hp-date">${escapeHtml(todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1))}</span>
-      </div>
-      <header class="hp-hero">
-        <p class="hp-kicker">Pilotage Sinaï</p>
-        <h1 class="hp-title">${greetName ? `${greetWord}, <em>${escapeHtml(greetName)}</em>` : "Pilotage Sinaï"}</h1>
-        <p class="hp-subtitle">Contacts, familles, structures, dons et suivi des interactions, centralisés et à jour.</p>
-        <div class="hp-actions">
-          ${action("Nouveau contact", "add-contact", "hp-btn hp-btn-primary")}
-          ${action("Nouveau don", "add-payment:Don", "hp-btn hp-btn-ghost")}
-        </div>
-      </header>
-
-      <section class="hp-stats hp-stats-2col">
-        ${hpStat("Reste à payer", euro(outstandingAmount), outstanding.length ? `${outstanding.length} paiement(s) à encaisser` : "Rien en attente")}
-        ${hpStat("Tâches en retard", lateTasks.length.toLocaleString("fr-FR"), lateTasks.length ? "À traiter en priorité" : "Rien en retard")}
-      </section>
-
-      ${hpTasksPanel()}
-
-      ${hpBirthdaysPanel()}
-
-      ${hpPortfolioPanel()}
-
-      ${hpHolidayPanel()}
-
-      <section class="hp-columns">
-        ${hpCard("hp-icon-family", "Contacts et familles", [["Ajouter un contact", "add-contact"], ["Ajouter une structure", "add-structure"], ["Rechercher les doublons", "dedupe"]])}
-        ${hpCard("hp-icon-coin", "Collecte", [["Ajouter un don", "add-payment:Don"], ["Ajouter une adhésion", "add-payment:Adhésion"], ["Reçus", "goto-receipts"]])}
-        ${hpCard("hp-icon-check", "Suivi", [["Ajouter une interaction", "add-interaction"], ["Voir les interactions", "goto-interactions"], ["Voir le journal", "goto-audit"]])}
-        ${hpCard("hp-icon-import", "Import", [["Importer un fichier", "import-new"], ["Exporter la vue active", "export-current"]])}
-      </section>
-
-      ${recentInteractions.length ? `<section class="hp-activity${panelCls("activity")}">
-        <div class="hp-activity-head"><h2>Activité récente</h2><button type="button" class="hp-link" data-action="goto-interactions">Voir tout</button>${panelToggle("activity")}</div>
-        <div class="hp-timeline">${recentInteractions.map(i => hpActivityItem(i)).join("")}</div>
-      </section>` : ""}
-
-      <section class="hp-activity hp-admin${panelCls("overview")}">
-        <div class="hp-activity-head"><h2>Vue d'ensemble</h2><span class="hp-admin-tag">Administration générale</span>${panelToggle("overview")}</div>
-        <div class="hp-stats hp-stats-2col hp-stats-boxed">
-          ${hpStat("Montant total", euro(totalDons), "Historique importé + dons enregistrés")}
-          ${hpStat("Emails manquants", missingEmail.toLocaleString("fr-FR"), "À compléter pour l'emailing")}
-        </div>
-      </section>
-    </div>`;
-}
 
 // ---- Stratégie des fêtes juives -------------------------------------------
 // Logique d'un directeur de collecte de fonds pensée pour la mission de
@@ -1376,11 +1655,14 @@ function ensureHolidayReminders() {
   let created = false;
   upcomingHolidays(3).forEach(h => {
     if (h.daysLeft > 30) return;
-    if (tasks.some(t => t.holidayKey === h.key)) return;
+    if (tasks.some(t => t.holidayKey === h.key) || holidayNotes[h.key]?.reminded) return;
     const t = buildTask(`Réfléchir à une idée pour ${h.name}`, today, null);
     if (!t) return;
     t.holidayKey = h.key;
     tasks.unshift(t);
+    // Mémorise que le rappel a été posé : supprimer la tâche ne la fait plus
+    // réapparaître à chaque ouverture de l'app.
+    holidayNotes[h.key] = { ...(holidayNotes[h.key] || {}), reminded: true };
     created = true;
   });
   return created;
@@ -1628,7 +1910,7 @@ function hpPortfolioRow({ r, days, tone }) {
       <span class="hp-portfolio-dot hp-portfolio-dot-${tone}"></span>
       <span class="hp-portfolio-info"><strong>${escapeHtml(r.name)}</strong><span class="hp-portfolio-meta">${amount ? euro(amount) + " donnés · " : ""}${label}</span></span>
     </button>
-    ${action("Enregistrer un contact", `portfolio-touch:${r.id}`, "primary-btn")}
+    ${action("Consigner un contact", `portfolio-touch:${r.id}`, "btn-sm")}
   </div>`;
 }
 function openPortfolioTouch(id) {
@@ -1814,56 +2096,17 @@ function hpTasksPanel() {
           <button type="submit" class="hp-task-add" title="Ajouter la tâche"><span class="hp-task-btn-icon" aria-hidden="true">+</span><span class="hp-task-btn-label">Ajouter</span></button>
         </div>
       </div>
-      <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher">✕</button></div>
+      <div class="hp-task-linked" id="hpTaskLinked" hidden>Lié à <strong id="hpTaskLinkedName"></strong><button type="button" id="hpTaskUnlink" title="Détacher" aria-label="Détacher">${icon("x", 13)}</button></div>
     </form>
     ${shown.length ? `<div class="hp-task-list">${shown.map(t => hpTaskRow(t)).join("")}</div>` : `<p class="muted-note">Aucune tâche en cours${me ? ` pour ${escapeHtml(me)}` : ""}. Ajoute la première ci-dessus.</p>`}
     ${done.length ? `<button type="button" class="hp-link hp-tasks-done-toggle" data-action="toggle-done-tasks">${showDone ? "Masquer" : "Voir"} les tâches terminées (${done.length})</button>` : ""}
     ${showDone && shownDone.length ? `<div class="hp-task-list hp-task-list-done">${shownDone.map(t => hpTaskRow(t)).join("")}</div>` : ""}
   </section>`;
 }
-function hpTaskRow(t) {
-  const due = taskDueInfo(t);
-  const linkedRecord = t.recordId ? recordById(t.recordId) : null;
-  const done = t.status === "fait";
-  // Mise en page type "Rappels" d'iPhone : case ronde, titre sur toute la
-  // largeur, puis une ligne de méta discrète (échéance colorée · contact ·
-  // assigné) au lieu d'une rangée de pastilles qui passait à la ligne et
-  // flottait à droite sur mobile. Modifier/supprimer restent à droite.
-  const dueBtn = due.label
-    ? `<button type="button" class="hp-task-date hp-task-date-${done ? "none" : due.tone}" data-action="edit-task:${t.id}" title="Modifier l'échéance">${escapeHtml(due.label)}</button>`
-    : `<button type="button" class="hp-task-date hp-task-date-none" data-action="edit-task:${t.id}" title="Ajouter une échéance">Sans échéance</button>`;
-  return `<div class="hp-task-row${done ? " hp-task-row-done" : ""}">
-    <input type="checkbox" class="hp-task-checkbox" data-action="toggle-task:${t.id}" ${done ? "checked" : ""} aria-label="Marquer comme faite">
-    <div class="hp-task-body">
-      <span class="hp-task-title">${escapeHtml(t.title)}</span>
-      <div class="hp-task-meta">
-        ${dueBtn}
-        ${linkedRecord ? `<button type="button" class="hp-task-contact-chip" data-action="open-record:${linkedRecord.id}:Tâches" title="Ouvrir la fiche">${escapeHtml(linkedRecord.name || "")}</button>` : ""}
-        ${t.holidayKey ? `<button type="button" class="hp-task-contact-chip" data-action="holiday-prepare:${t.holidayKey}" title="Ouvrir la case idée">💡 Idée</button>` : ""}
-        ${t.assignedTo ? `<span class="hp-task-assignee" title="Assignée à ${escapeHtml(t.assignedTo)}">${escapeHtml(t.assignedTo)}</span>` : ""}
-      </div>
-    </div>
-    <div class="hp-task-row-icons">
-      <button type="button" class="hp-task-edit" data-action="edit-task:${t.id}" title="Modifier" aria-label="Modifier">✎</button>
-      <button type="button" class="hp-task-remove" data-action="delete-task:${t.id}" title="Supprimer" aria-label="Supprimer">✕</button>
-    </div>
-  </div>`;
-}
-// Modifier une tâche existante : jusqu'ici on pouvait seulement cocher,
-// changer la date (directement sur la ligne) ou supprimer une tâche —
-// impossible de corriger une faute de frappe dans le titre, changer le
-// contact lié ou réassigner la tâche sans tout refaire depuis le début.
 function openEditTask(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return notify("Tâche introuvable");
-  const linked = t.recordId ? recordById(t.recordId) : null;
-  modalShell("editTask", "Tâche", "Modifier la tâche",
-    `<input type="hidden" name="taskId" value="${escapeHtml(t.id)}">
-     ${field("Titre de la tâche", "title", t.title, "text", "required maxlength='140'")}
-     ${field("Échéance", "dueDate", t.dueDate || "", "date")}
-     ${field("Heure (si nécessaire)", "dueTime", t.dueTime || "", "time")}
-     ${pickerField("Contact lié (optionnel)", "recordId", linked, false, true)}
-     ${field("Assigné à", "assignedTo", t.assignedTo || "")}`, "Enregistrer");
+  modalShell("editTask", "Tâche", "Modifier la tâche", taskFormBody(t, null), "Enregistrer");
 }
 // Reconnaît un verbe d'action suivi d'un nom ("Contacter Dupont", "Relancer
 // Cohen"...) pour proposer des fiches du CRM en autocomplétion ; à défaut de
@@ -1968,11 +2211,13 @@ function toggleTaskDone(id) {
   render();
 }
 function deleteHomeTask(id) {
-  const t = tasks.find(x => x.id === id);
-  tasks = tasks.filter(x => x.id !== id);
-  if (t) logAudit(`Tâche supprimée : ${t.title}.`);
+  const index = tasks.findIndex(x => x.id === id);
+  if (index < 0) return;
+  const [t] = tasks.splice(index, 1);
+  logAudit(`Tâche supprimée : ${t.title}.`);
   saveCrmData();
   render();
+  notify("Tâche supprimée", false, { label: "Annuler", run: () => { tasks.splice(Math.min(index, tasks.length), 0, t); saveCrmData(); render(); } });
 }
 
 // ---- Notifications push réelles (reçues même app fermée) -----------------
@@ -2146,61 +2391,12 @@ function notifSettingsPanel() {
   </section>`;
 }
 
-const HP_ICONS = {
-  "hp-icon-family": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.6-3.2 2.9-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="17" cy="9" r="2.2"/><path d="M15.8 13.6c1.9.3 3.4 1.8 3.9 4.2"/></svg>',
-  "hp-icon-coin": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M14.6 9.3a3.6 3.6 0 1 0 0 5.4"/><path d="M7.5 10.6h5.5M7.5 13.4h4.6"/></svg>',
-  "hp-icon-check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M8 12.2l2.4 2.4L16 9.2"/></svg>',
-  "hp-icon-import": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11 12 15.5 16.5 11"/><path d="M4.5 18.5h15"/></svg>',
-};
 
-function hpStat(label, value, note) {
-  return `<div class="hp-stat">
-    <span class="hp-stat-label">${escapeHtml(label)}</span>
-    <strong class="hp-stat-value">${value}</strong>
-    <span class="hp-stat-note">${escapeHtml(note)}</span>
-  </div>`;
-}
 
-function hpCard(icon, title, rows) {
-  return `<section class="hp-card">
-    <div class="hp-card-head">${HP_ICONS[icon] || ""}<h3>${escapeHtml(title)}</h3></div>
-    <div class="hp-card-links">${rows.map(([label, key]) => `<button type="button" class="hp-card-link" data-action="${escapeHtml(key || label)}">${escapeHtml(label)}<span class="hp-card-arrow">→</span></button>`).join("")}</div>
-  </section>`;
-}
 
-function hpActivityItem(i) {
-  const r = recordById(i.recordId);
-  const name = r ? r.name : (i.target || "Contact supprimé");
-  return `<button class="hp-timeline-item" type="button" data-action="open-record:${i.recordId}:Activité">
-    <span class="hp-timeline-dot"></span>
-    <span class="hp-timeline-body">
-      <span class="hp-timeline-top"><strong>${escapeHtml(name)}</strong><span class="hp-timeline-kind">${escapeHtml(i.type || "")}</span></span>
-      <span class="hp-timeline-label">${escapeHtml(i.label || "")}${i.note ? " — " + escapeHtml(i.note) : ""}</span>
-      <span class="hp-timeline-date">${i.date || ""}</span>
-    </span>
-  </button>`;
-}
 
-function card(title, rows) {
-  return `<section class="panel pad compact-card"><h3>${title}</h3>${rows.map(([label, key]) => action(label, key)).join("")}</section>`;
-}
 
-function activityItem(i) {
-  const r = recordById(i.recordId);
-  const name = r ? r.name : (i.target || "Contact supprimé");
-  const kindTag = i.type === "Commentaire" ? tag("Commentaire", "violet") : tag(i.type, "blue");
-  return `<button class="timeline-item" type="button" data-action="open-record:${i.recordId}"><strong>${escapeHtml(name)}</strong> ${kindTag}<p>${escapeHtml(i.label || "")}${i.note ? " — " + escapeHtml(i.note) : ""}</p><span class="timeline-date">${i.date}</span></button>`;
-}
 
-function crm() {
-  if (state.section === "Segments") return segments();
-  if (state.section === "Groupes") return groupsView();
-  if (state.section === "Interactions") return interactionsView();
-  if (state.section === "Liaisons") return linkagesView();
-  if (state.section === "Portefeuille") return portfolioView();
-  if (state.section === "Anniversaires") return birthdaysView();
-  return recordsView(state.section === "Structures" ? "Structure" : state.section === "Contacts" ? "Contact" : null);
-}
 
 // Page dédiée "Portefeuille" (accessible depuis le menu CONTACTS) : liste
 // complète (pas seulement les 8 premiers comme sur l'accueil) des donateurs
@@ -2221,7 +2417,7 @@ function portfolioView() {
         <h2>Mon portefeuille</h2>
         <p class="muted-note">Identifié comme <strong>${escapeHtml(mine || "—")}</strong>${mine ? "" : " — aucun prénom sur votre compte, contactez un administrateur"} · ${list.length} contact${list.length > 1 ? "s" : ""} suivi${list.length > 1 ? "s" : ""}${overdue ? `, ${overdue} à recontacter` : ""}.</p>
       </div>
-      ${action("+ Ajouter un contact à mon portefeuille", "add-to-portfolio", "primary-btn")}
+      ${action("Ajouter un contact", "add-to-portfolio", "primary-btn")}
     </div>
     ${list.length ? `<div class="hp-portfolio-list">${list.map(portfolioViewRow).join("")}</div>`
       : emptyState("Aucun contact suivi pour l'instant. Ajoutez les donateurs que vous accompagnez personnellement, ou utilisez le champ « Portefeuille » sur une fiche.", "+ Ajouter un contact à mon portefeuille", "add-to-portfolio")}
@@ -2236,8 +2432,8 @@ function portfolioViewRow({ r, days, tone }) {
       <span class="hp-portfolio-info"><strong>${escapeHtml(r.name)}</strong><span class="hp-portfolio-meta">${amount ? euro(amount) + " donnés · " : ""}${label}</span></span>
     </button>
     <div class="hp-portfolio-row-actions">
-      ${action("Enregistrer un contact", `portfolio-touch:${r.id}`, "primary-btn")}
-      ${action("Retirer", `toggle-portfolio:${r.id}`)}
+      ${action("Consigner un contact", `portfolio-touch:${r.id}`, "btn-sm")}
+      ${action("Retirer", `toggle-portfolio:${r.id}`, "btn-sm")}
     </div>
   </div>`;
 }
@@ -2283,7 +2479,7 @@ function filterCheckGroup(legend, key, options, labelFn) {
 function filtersDrawerBody() {
   const f = activeFilters();
   const payStatusLabels = { paye: "Déjà payé", attente: "En attente" };
-  return `<p class="muted-note">Affine la liste des contacts/structures ci-dessous. Les critères se combinent (ET), et peuvent ensuite être enregistrés comme segment réutilisable.</p>
+  return `<p class="muted-note">Les critères se combinent entre eux ; dans une même liste, cocher plusieurs cases élargit le résultat.</p>
     <fieldset class="filter-group">
       <legend>Montant total donné</legend>
       <div class="filter-range-row">
@@ -2301,6 +2497,18 @@ function filtersDrawerBody() {
         </select>
       </div>
     </fieldset>
+    <fieldset class="filter-group">
+      <legend>Dernier don</legend>
+      <div class="filter-select-row">
+        <select data-filter-select="lastGift">
+          <option value="" ${!f.lastGift ? "selected" : ""}>Indifférent</option>
+          <option value="12m" ${f.lastGift === "12m" ? "selected" : ""}>A donné depuis 12 mois</option>
+          <option value="old" ${f.lastGift === "old" ? "selected" : ""}>Dernier don il y a plus de 12 mois</option>
+          <option value="never" ${f.lastGift === "never" ? "selected" : ""}>N'a jamais donné</option>
+        </select>
+      </div>
+    </fieldset>
+    ${filterCheckGroup("Étiquettes", "tags", distinctTags())}
     ${filterCheckGroup("École / campus", "campuses", CAMPUS_OPTIONS)}
     ${filterCheckGroup("Année de don", "years", distinctPaymentYears())}
     ${filterCheckGroup("Type de paiement", "paymentTypes", PAYMENT_TYPE_OPTIONS)}
@@ -2308,56 +2516,12 @@ function filtersDrawerBody() {
     ${filterCheckGroup("Statut du paiement", "payStatus", ["paye", "attente"], v => payStatusLabels[v] || v)}
     ${filterCheckGroup("Segment historique (étiquette libre)", "segments", distinctLegacySegmentTags())}
     <div class="filter-drawer-actions">
-      ${action("Réinitialiser les filtres", "reset-filters-only")}
-      ${action("Enregistrer comme segment", "save-segment", "primary-btn")}
+      ${action("Réinitialiser", "reset-filters-only")}
+      ${action("Créer un segment", "save-segment")}
+      ${action(`Voir ${sortedRecords(state.section === "Structures" ? "Structure" : "Contact").length.toLocaleString("fr-FR")} fiche(s)`, "close-drawer", "primary-btn")}
     </div>`;
 }
 
-function recordsView(kind) {
-  const rows = filteredRecords().filter(r => !kind || r.kind === kind);
-  if (!rows.length && !records.length) {
-    return emptyState("Aucun contact pour l'instant. Ajoutez-en un ou importez un fichier.", "Ajouter un contact", "add-contact");
-  }
-  const selected = recordById(state.selectedRecord) || rows[0] || records[0];
-  if (selected) state.selectedRecord = selected.id;
-  const totalAmount = rows.reduce((sum, r) => sum + recordTotalAmount(r), 0);
-  const missingEmail = rows.filter(r => !r.email).length;
-  const recordLabel = kind === "Structure" ? "structures" : kind === "Contact" ? "contacts" : "fiches";
-  const showDetail = state.showDetail && rows.length && selected;
-  const { visible, remaining } = visiblePage(rows, "recordsPage");
-  const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-records">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
-  return `<div class="records-layout${showDetail ? "" : " no-detail"}${showDetail && state.mobileDetailOpen ? " mobile-detail-open" : ""}">
-    <section class="panel records-panel">
-      <div class="records-command">
-        <div>
-          <span class="eyebrow">Répertoire Sinaï</span>
-          <h2>${rows.length.toLocaleString("fr-FR")} ${recordLabel}</h2>
-          <p>Vue de travail pour qualifier, segmenter et suivre les relations.</p>
-        </div>
-        <div class="command-stats">
-          <div><strong>${euro(totalAmount)}</strong><span>Montant relié</span></div>
-          <div><strong>${missingEmail.toLocaleString("fr-FR")}</strong><span>Emails absents</span></div>
-          <div><strong>${rows.reduce((sum, r) => sum + recordInteractionsCount(r), 0).toLocaleString("fr-FR")}</strong><span>Interactions</span></div>
-        </div>
-      </div>
-      <div class="toolbar records-tools">
-        <input class="search" id="pageSearch" value="${escapeHtml(state.query)}" placeholder="Rechercher un nom, un email ou une ville" autocapitalize="off" autocorrect="off" spellcheck="false" />
-        <div class="row-actions">${filtersButton()}${action("Contact", "add-contact", "primary-btn")} ${action("Structure", "add-structure")}${showDetail ? "" : (rows.length ? action("Voir la fiche", "open-detail") : "")}</div>
-      </div>
-      <div class="table-wrap desktop-only"><table class="records-table">
-      <thead><tr><th>Nom</th><th>ID</th><th>Email</th><th>Téléphone</th><th>Étiquettes</th><th>Montant total</th><th>Interactions</th></tr></thead>
-      <tbody>${visible.map(r => `<tr class="${showDetail && r.id === selected.id ? "selected" : ""}" data-record="${r.id}">
-        <td class="name-cell"><strong>${escapeHtml(r.name)}</strong><span>${r.kind}</span></td><td>${r.id}</td><td>${escapeHtml(r.email || "-")}</td><td>${escapeHtml(r.phone || "-")}</td><td>${(r.tags || []).map((t,i)=>tag(t, ["","blue","violet"][i%3])).join(" ") || "-"}</td><td class="money-cell">${euro(recordTotalAmount(r))}</td><td>${recordInteractionsCount(r)}</td>
-      </tr>`).join("")}</tbody></table>${loadMore}</div>
-      <div class="record-cards mobile-only">${visible.map(r => `<button type="button" class="record-card ${showDetail && r.id === selected.id ? "selected" : ""}" data-record="${r.id}">
-        <div class="record-card-head"><strong>${escapeHtml(r.name)}</strong><span class="money-cell">${euro(recordTotalAmount(r))}</span></div>
-        <p>${escapeHtml(r.email || "Pas d'email")} · ${escapeHtml(r.phone || "Pas de téléphone")}</p>
-        <div class="chip-list">${(r.tags || []).map(t=>tag(t,"blue")).join("")}</div>
-      </button>`).join("")}${loadMore}</div>
-    </section>
-    ${showDetail ? recordDetail(selected) : ""}
-  </div>`;
-}
 
 // Nombre de fiches correspondant à un segment enregistré, recalculé à chaque
 // affichage de la page (donc toujours à jour) sans toucher aux filtres/à la
@@ -2379,7 +2543,9 @@ function summarizeSegmentCriteria(f) {
   if (f.paymentTypes?.length) parts.push(f.paymentTypes.join(", "));
   if (f.occasions?.length) parts.push(f.occasions.join(", "));
   if (f.payStatus?.length) parts.push(f.payStatus.map(s => ({ paye: "Déjà payé", attente: "En attente" }[s] || s)).join(", "));
-  if (f.segments?.length) parts.push(`Étiquette : ${f.segments.join(", ")}`);
+  if (f.segments?.length) parts.push(`Segment : ${f.segments.join(", ")}`);
+  if (f.tags?.length) parts.push(`Étiquette : ${f.tags.join(", ")}`);
+  if (f.lastGift) parts.push({ "12m": "A donné depuis 12 mois", old: "Dernier don > 12 mois", never: "N'a jamais donné" }[f.lastGift]);
   return parts.length ? parts.join(" · ") : "Aucun critère";
 }
 // Ouvre Contacts avec les filtres d'un segment enregistré (dynamique) déjà
@@ -2389,25 +2555,21 @@ function summarizeSegmentCriteria(f) {
 function applySegment(seg) {
   navigate("crm", "Contacts", { ...defaultFilters(), ...(seg.filters || {}) });
 }
-// Enregistre les filtres actuellement cochés dans le tiroir "Filtres" comme
-// segment réutilisable (savedViews, déjà persisté mais jusqu'ici inutilisé).
-// Demande au moins un critère pour éviter d'enregistrer un segment vide (qui
-// correspondrait silencieusement à "toutes les fiches").
-function saveCurrentFiltersAsSegment() {
+async function saveCurrentFiltersAsSegment() {
   const f = activeFilters();
-  if (!filtersAreActive(f)) { notify("Cochez au moins un critère avant d'enregistrer un segment"); return; }
-  const name = (window.prompt("Nom du segment (ex : \"Donateurs récurrents Beth Mena'hem\")") || "").trim();
+  if (!filtersAreActive(f)) { notify("Choisissez au moins un critère dans les filtres avant d'enregistrer un segment"); state.drawer = "filters"; render(); return; }
+  const name = await uiPrompt("Nom du segment", "", { title: "Enregistrer comme segment", placeholder: "Ex : Donateurs fidèles Beth Mena'hem", okLabel: "Enregistrer" });
   if (!name) return;
   savedViews.push({ id: nextId("SEG", savedViews), name, filters: { ...f }, createdAt: new Date().toISOString() });
   logAudit(`Segment enregistré : ${name}.`);
   saveCrmData();
-  notify(`Segment "${name}" enregistré`);
+  notify(`Segment « ${name} » enregistré`);
   render();
 }
-function deleteSavedSegment(id) {
+async function deleteSavedSegment(id) {
   const seg = savedViews.find(s => s.id === id);
   if (!seg) return;
-  if (!window.confirm(`Supprimer le segment "${seg.name}" ?`)) return;
+  if (!await uiConfirm(`Supprimer le segment « ${seg.name} » ? Les fiches ne sont pas touchées.`, { title: "Supprimer le segment", danger: true, okLabel: "Supprimer" })) return;
   savedViews = savedViews.filter(s => s.id !== id);
   logAudit(`Segment supprimé : ${seg.name}.`);
   saveCrmData();
@@ -2415,166 +2577,32 @@ function deleteSavedSegment(id) {
 }
 function segments() {
   const legacyTags = distinctLegacySegmentTags();
-  return `<section class="panel pad">
-    <div class="toolbar"><h2>Segments enregistrés</h2>${action("Enregistrer comme segment", "save-segment", "primary-btn")}</div>
-    <p class="muted-note">Créés depuis le tiroir "Filtres" des Contacts (montant, récurrence, campus, année, type de paiement, occasion, statut) — le nombre de fiches correspondant est toujours recalculé à jour.</p>
-    ${savedViews.length ? `<div class="table-wrap"><table><thead><tr><th>Nom</th><th>Critères</th><th>Fiches</th><th>Créé le</th><th></th></tr></thead><tbody>${savedViews.map(seg => `<tr>
-        <td><strong>${escapeHtml(seg.name)}</strong></td>
-        <td>${escapeHtml(summarizeSegmentCriteria(seg.filters || {}))}</td>
-        <td>${segmentMatchCount(seg).toLocaleString("fr-FR")}</td>
-        <td>${seg.createdAt ? formatFrDateFull(seg.createdAt.slice(0, 10)) : "-"}</td>
-        <td class="row-actions">${action("Appliquer", `apply-saved-segment:${seg.id}`, "primary-btn")}${action("Supprimer", `delete-saved-segment:${seg.id}`)}</td>
-      </tr>`).join("")}</tbody></table></div>` : emptyState("Aucun segment enregistré pour l'instant. Ouvrez le tiroir \"Filtres\" depuis Contacts, choisissez vos critères, puis \"Enregistrer comme segment\".", "Aller aux contacts", "goto-contacts")}
-    ${legacyTags.length ? `<div class="segment-legacy">
-      <span class="eyebrow">Segments historiques (étiquette libre, importés)</span>
-      <div class="chip-list">${legacyTags.map(s => `<button type="button" class="tag" data-action="apply-legacy-segment:${encodeURIComponent(s)}">${escapeHtml(s)}</button>`).join("")}</div>
-    </div>` : ""}
-  </section>`;
-}
-
-function groupsView() {
-  const derived = {};
-  records.forEach(r => (r.groups || []).forEach(g => { derived[g] = derived[g] || { contacts: 0, structures: 0 }; derived[g][r.kind === "Structure" ? "structures" : "contacts"] += 1; }));
-  const manual = groups.filter(g => !(g.name in derived));
-  const rows = [...Object.entries(derived).map(([name, c]) => ({ name, ...c, type: "Détecté" })), ...manual];
-  return `<section class="panel">${toolbar("Rechercher un nom de groupe")}<div class="toolbar thin"><div class="row-actions">${action("Créer un groupe", "add-group", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Nom</th><th>Contacts</th><th>Structures</th><th>Origine</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHtml(r.name)}</td><td>${r.contacts||0}</td><td>${r.structures||0}</td><td>${r.type||"Manuel"}</td></tr>`).join("")}</tbody></table></div>` : emptyState("Aucun groupe pour l'instant. Les groupes apparaissent ici dès qu'une fiche en porte un, ou créez-en un manuellement.", "Créer un groupe", "add-group")}
-  </section>`;
-}
-
-function interactionsView() {
-  const rows = [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || ""));
-  return `<section class="panel">${toolbar("Rechercher dans les interactions")}<div class="toolbar thin"><div class="row-actions">${action("Ajouter une interaction", "add-interaction", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Contact / structure</th><th>Catégorie</th><th>Libellé</th><th>Type</th><th>Note</th><th>Utilisateur</th></tr></thead><tbody>${rows.map(r=>{
-      const rec = recordById(r.recordId);
-      return `<tr class="row-click" data-action="open-record:${r.recordId}:Activité"><td>${r.date}</td><td>${escapeHtml(rec ? rec.name : (r.target || "-"))}</td><td>${r.category||"-"}</td><td>${escapeHtml(r.label||"-")}</td><td>${r.type==="Commentaire"?tag("Commentaire","violet"):r.type}</td><td>${escapeHtml(r.note||"-")}</td><td>${r.user}</td></tr>`;
-    }).join("")}</tbody></table></div>
-    <div class="record-cards mobile-only">${rows.map(r=>{
-      const rec = recordById(r.recordId);
-      return `<button type="button" class="record-card" data-action="open-record:${r.recordId}:Activité">
-        <div class="record-card-head"><strong>${escapeHtml(rec ? rec.name : (r.target || "-"))}</strong><span>${r.date}</span></div>
-        <p>${r.type==="Commentaire" ? "Commentaire" : escapeHtml(r.category||r.type||"-")}${r.label ? " — " + escapeHtml(r.label) : ""}</p>
-        ${r.note ? `<p>${escapeHtml(r.note)}</p>` : ""}
-      </button>`;
-    }).join("")}</div>` : emptyState("Aucune interaction enregistrée pour l'instant.", "Ajouter une interaction", "add-interaction")}
-  </section>`;
-}
-
-function linkagesView() {
-  return `<section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Ajouter une liaison", "add-linkage", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${linkages.length ? `<div class="table-wrap"><table><thead><tr><th>Contact A</th><th>Rôle A</th><th>Contact / structure B</th><th>Rôle B</th><th>Type de liaison</th></tr></thead><tbody>${linkages.map(r=>`<tr><td>${escapeHtml(r.a)}</td><td>${r.roleA}</td><td>${escapeHtml(r.b)}</td><td>${r.roleB}</td><td>${r.type}</td></tr>`).join("")}</tbody></table></div>` : emptyState("Aucune liaison enregistrée (lien familial, professionnel...).", "Ajouter une liaison", "add-linkage")}
-  </section>`;
-}
-
-function paymentTable(type = null) {
-  const rows = filteredPayments(type);
-  const { visible, remaining } = visiblePage(rows, "paymentsPage");
-  const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
-  return `<section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Ajouter un paiement", `add-payment:${type || "Don"}`, "primary-btn")} ${action("Générer les reçus manquants", "generate-receipts")} ${action("Exporter", "export-current")}</div></div>
-    <div class="pay-tabs">${["Tous les paiements","Dons","Adhésions","Billetterie","Reçus"].map(s => `<button class="${state.section===s ? "active" : ""}" data-view="pay" data-section="${s}">${s}</button>`).join("")}</div>
-    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} paiement(s)${state.query ? " correspondant à la recherche" : ""}.</p>
-    <div class="table-wrap desktop-only"><table><thead><tr><th>Date</th><th>Nom</th><th>Montant</th><th>Type</th><th>Occasion</th><th>Statut</th><th>Moyen</th><th>Reçu</th></tr></thead>
-    <tbody>${visible.map(p => `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${paymentPrimaryDate(p)}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${p.type}</td><td>${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ") || "-"}</td><td>${status(p.status)}</td><td>${p.method}</td><td>${status(p.receipt)}</td></tr>`).join("")}</tbody></table>${loadMore}</div>
-    <div class="record-cards mobile-only">${visible.map(p => `<button type="button" class="record-card" data-action="open-record:${p.recordId}:Paiements">
-      <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
-      <p>${escapeHtml(p.type)} · ${paymentPrimaryDate(p)} · ${escapeHtml(p.method || "-")}</p>
-      <div class="chip-list">${status(p.status)} ${status(p.receipt)} ${(p.occasion||[]).map(o=>tag(o,"violet")).join(" ")}</div>
-    </button>`).join("")}${loadMore}</div>` : emptyState("Aucun paiement enregistré pour l'instant.", "Ajouter un don", "add-payment:Don")}
-  </section>`;
-}
-
-function paymentsView() {
-  const map = { Dons: "Don", Adhésions: "Adhésion", Billetterie: "Billetterie" };
-  if (state.section === "Reçus") return receipts();
-  return paymentTable(map[state.section]);
-}
-
-function receipts() {
-  const rows = payments.filter(p => p.type === "Don" || p.type === "Adhésion");
-  const { visible, remaining } = visiblePage(rows, "paymentsPage");
-  const loadMore = remaining ? `<button type="button" class="load-more" data-action="load-more-payments">Afficher ${Math.min(remaining, PAGE_STEP)} de plus (${remaining.toLocaleString("fr-FR")} restants)</button>` : "";
-  return `<div class="split"><section class="panel">${toolbar()}<div class="toolbar thin"><div class="row-actions">${action("Générer les reçus manquants", "generate-receipts", "primary-btn")} ${action("Exporter", "export-current")}</div></div>
-    ${rows.length ? `<p class="muted-note">${rows.length.toLocaleString("fr-FR")} don(s)/adhésion(s).</p>
-    <div class="table-wrap desktop-only"><table><thead><tr><th>Reçu</th><th>Payeur</th><th>Montant</th><th>Statut</th><th>PDF</th></tr></thead><tbody>${visible.map(p=>{
-      const externe = p.receipt === "Généré ailleurs";
-      return `<tr class="row-click" data-action="open-record:${p.recordId}:Paiements"><td>${p.receiptNumber || "-"}</td><td>${escapeHtml(p.payer)}</td><td>${euro(p.amount)}</td><td>${status(p.receipt)}</td><td class="row-actions">${externe ? `<span class="muted-note">Émis par l'ancien système</span>` : `${p.receiptNumber ? action("Télécharger", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer", `regenerate-receipt:${p.id}`)}`}</td></tr>`;
-    }).join("")}</tbody></table>${loadMore}</div>
-    <div class="record-cards mobile-only">${visible.map(p => {
-      const externe = p.receipt === "Généré ailleurs";
-      return `<div class="record-card" data-action="open-record:${p.recordId}:Paiements">
-      <div class="record-card-head"><strong>${escapeHtml(p.payer)}</strong><span class="money-cell">${euro(p.amount)}</span></div>
-      <p>${p.receiptNumber || "Pas encore de numéro"}</p>
-      <div class="chip-list">${status(p.receipt)}</div>
-      <div class="row-actions">${externe ? `<span class="muted-note">Émis par l'ancien système</span>` : `${p.receiptNumber ? action("Télécharger le PDF", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer le PDF", `regenerate-receipt:${p.id}`)}`}</div>
-    </div>`;
-    }).join("")}${loadMore}</div>` : emptyState("Aucun don ou adhésion pour l'instant.")}
-    </section><section class="panel pad">
-      <span class="eyebrow">Modèles de reçus</span><h2>Configuration fiscale</h2>
-      <div class="timeline">${receiptTemplates.map(t => `<div class="timeline-item"><strong>${t.name}</strong><p>${t.entity} — ${t.mode} — Signature ${t.signature}</p></div>`).join("")}</div>
-      ${action("Ajouter un modèle", "add-receipt-template")}
-      <hr class="section-sep">
-      <span class="eyebrow">Suivi comptable</span><h2>Journal des reçus CERFA</h2>
-      <p class="muted-note">${receiptLog.length ? `${receiptLog.length.toLocaleString("fr-FR")} génération(s)/régénération(s) enregistrée(s)` : "Aucune génération enregistrée pour l'instant"} — une ligne par émission, à donner tel quel à l'expert-comptable.</p>
-      ${action("Exporter le suivi comptable (CSV)", "export-receipt-log", "primary-btn")}
-      <p class="muted-note" style="margin-top:14px">💡 PDF du reçu et envoi automatique par email : bientôt — en attente du modèle CERFA exact et du compte email dédié.</p>
-    </section></div>`;
-}
-
-function importsView() {
-  return `<section class="panel"><div class="toolbar"><h2>Historique des imports</h2>${action("Nouvel import", "import-new", "primary-btn")}</div>
-    ${imports.length ? `<div class="table-wrap"><table><thead><tr><th>Statut</th><th>Date</th><th>Fichier</th><th>Lignes</th><th>Créés</th><th>Mis à jour</th><th>Doublons</th><th>Erreurs</th></tr></thead><tbody>${imports.map((r)=>`<tr><td>${status(r.status)}</td><td>${r.date}</td><td><strong>${escapeHtml(r.file)}</strong></td><td>${Number(r.rows).toLocaleString("fr-FR")}</td><td>${Number(r.created).toLocaleString("fr-FR")}</td><td>${Number(r.updated).toLocaleString("fr-FR")}</td><td>${Number(r.duplicates).toLocaleString("fr-FR")}</td><td>${Number(r.errors).toLocaleString("fr-FR")}</td></tr>`).join("")}</tbody></table></div>` : emptyState("Aucun import pour l'instant.", "Importer un fichier", "import-new")}
-  </section>`;
-}
-
-function appsView() {
-  return `<section class="panel pad">
-    <div class="toolbar clean"><div><span class="eyebrow">À venir</span><h2>Connexions externes</h2><p>Ces connexions ne sont pas encore actives : aucune donnée n'est synchronisée automatiquement pour l'instant.</p></div></div>
-    <div class="integration-grid">${apps.map(a=>`<div class="integration"><header><strong>${a[0]}</strong><span class="tag">Bientôt</span></header><p>${a[1]}</p>${action("Être prévenu", `notify-app:${a[0]}`)}</div>`).join("")}</div>
-  </section>`;
-}
-
-function stats() {
-  const contacts = records.filter(r => r.kind === "Contact").length;
-  const structures = records.filter(r => r.kind === "Structure").length;
-  const totalDons = payments.filter(p => p.type === "Don").reduce((s,p)=>s+Number(p.amount||0),0);
-  const byMonth = {};
-  payments.forEach(p => {
-    const m = (p.at || "").slice(0, 7);
-    if (!m) return;
-    byMonth[m] = (byMonth[m] || 0) + Number(p.amount || 0);
-  });
-  const months = Object.keys(byMonth).sort().slice(-6);
-  const maxVal = Math.max(1, ...months.map(m => byMonth[m]));
-  return `<div class="hero-grid">
-    <section class="panel pad">
-      <span class="eyebrow">Vue d'ensemble</span><h2>Chiffres réels</h2>
-      <div class="metric-grid">${metric("Contacts", contacts, "Fiches individuelles")}${metric("Structures", structures, "Personnes morales")}${metric("Dons enregistrés dans le CRM", euro(totalDons), "Depuis l'utilisation du CRM")}${metric("Interactions", interactions.length, "Journalisées dans le CRM")}</div>
-      ${months.length ? `<div class="bar-chart">${months.map(m => `<div class="bar" style="height:${Math.max(6, Math.round(byMonth[m]/maxVal*100))}%"><span>${m}</span></div>`).join("")}</div>` : emptyState("Pas encore de dons datés à afficher sous forme de graphique. Il apparaîtra dès les premiers dons enregistrés.")}
+  const tags = distinctTags().slice(0, 40);
+  return `<div class="stack">
+    <section class="panel">
+      <div class="list-head"><div class="list-title"><h2>${savedViews.length ? plural(savedViews.length, "segment") : "Segments"}</h2><p>Une liste dynamique : enregistrez une combinaison de filtres, le nombre de fiches se met à jour tout seul.</p></div>${btn("Nouveau segment", "goto-contacts-filters", "primary-btn", "plus")}</div>
+      ${savedViews.length ? `<div class="rows rows-padded">${savedViews.map(seg => `<div class="row row-wide">
+          <button type="button" class="row-main" data-action="apply-saved-segment:${seg.id}"><span class="todo-ic">${icon("layers")}</span><span class="row-text"><strong>${escapeHtml(seg.name)}</strong><span>${escapeHtml(summarizeSegmentCriteria(seg.filters || {}))}</span></span></button>
+          <span class="row-amount">${plural(segmentMatchCount(seg), "fiche")}</span>
+          <div class="row-actions">${btn("Ouvrir", `apply-saved-segment:${seg.id}`, "btn-sm")}<button type="button" class="icon-btn btn-sm danger-text" data-action="delete-saved-segment:${seg.id}" title="Supprimer">${icon("trash")}</button></div>
+        </div>`).join("")}</div>`
+        : `<div class="empty-state"><span class="empty-ic">${icon("layers", 22)}</span><p>Aucun segment enregistré. Depuis Contacts, ouvrez « Filtres », choisissez vos critères (montant, année, étiquette, dernier don…), puis « Enregistrer comme segment ».</p>${btn("Aller aux contacts", "goto-contacts-filters", "primary-btn")}</div>`}
     </section>
-    <section class="panel pad"><span class="eyebrow">Segments</span><h2>Répartition</h2>${segmentsSummary()}</section>
+    ${tags.length ? `<section class="panel pad">${sectionHead("Par étiquette", "", "Cliquez sur une étiquette pour voir les fiches qui la portent.")}<div class="chip-list">${tags.map(t => `<button type="button" class="tag tag-btn" data-action="apply-tag:${encodeURIComponent(t)}">${escapeHtml(t)}</button>`).join("")}</div></section>` : ""}
+    ${legacyTags.length ? `<section class="panel pad">${sectionHead("Segments importés", "", "Segments en texte libre repris de l'ancien outil.")}<div class="chip-list">${legacyTags.map(s => `<button type="button" class="tag tag-btn" data-action="apply-legacy-segment:${encodeURIComponent(s)}">${escapeHtml(s)}</button>`).join("")}</div></section>` : ""}
   </div>`;
 }
 
-function segmentsSummary() {
-  const counts = {};
-  records.forEach(r => (r.tags || []).forEach(t => { counts[t] = (counts[t] || 0) + 1; }));
-  const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,8);
-  return top.length ? `<div class="chip-list">${top.map(([t,c])=>tag(`${t} (${c})`, "blue")).join("")}</div>` : emptyState("Aucune étiquette utilisée pour l'instant.");
-}
 
-function settingsView() {
-  if (state.section === "Reçus") return receipts();
-  if (state.section === "Catégories d'interaction") return categoriesView();
-  return `<div class="split"><section class="panel"><div class="toolbar"><h2>Champs personnalisés</h2>${action("Créer un champ", "add-field", "primary-btn")}</div>
-    <div class="table-wrap"><table><thead><tr><th>Nom</th><th>Type</th><th>Valeur(s)</th><th>Obligatoire ?</th><th>Profils</th></tr></thead><tbody>${customFields.map(r=>`<tr><td>${escapeHtml(r.name)}</td><td>${r.type}</td><td>${escapeHtml(r.values)}</td><td>${r.required}</td><td>${r.profile}</td></tr>`).join("")}</tbody></table></div></section>
-    <div class="stacked-panels">
-      <section class="panel pad"><span class="eyebrow">Configuration Sinaï</span><h2>Réglages</h2><div class="timeline">
-        <button class="timeline-item" type="button" data-action="add-receipt-template"><strong>Reçus fiscaux</strong><p>Modèles, signatures, entités émettrices.</p></button>
-        <button class="timeline-item" type="button" data-view="settings" data-section="Catégories d'interaction"><strong>Catégories d'interaction</strong><p>Ajouter, renommer ou supprimer les libellés (ex : Chiour).</p></button>
-      </div></section>
-      ${notifSettingsPanel()}
-    </div></div>`;
-}
+
+
+
+
+
+
+
+
+
 
 function categoriesView() {
   const counts = {};
@@ -2585,7 +2613,7 @@ function categoriesView() {
       <div class="category-row">
         <input type="text" value="${escapeHtml(c)}" data-category-index="${i}">
         <span class="mini-pill">${counts[c] || 0} interaction(s)</span>
-        <button type="button" class="icon-btn" data-action="delete-category:${i}" title="Supprimer">✕</button>
+        <button type="button" class="icon-btn" data-action="delete-category:${i}" title="Supprimer">${icon("trash")}</button>
       </div>`).join("")}</div>
     ${action("Ajouter une catégorie", "add-category", "primary-btn")}
     </section>
@@ -2593,57 +2621,27 @@ function categoriesView() {
     </div>`;
 }
 
-function admin() {
-  if (state.section === "Journal d'activité") return auditView();
-  if (!currentAccount || currentAccount.profile !== "Administrateur") {
-    return emptyState("La gestion des comptes est réservée aux administrateurs.");
-  }
-  const scopeLabel = (a) => a.scopeMode === "tags"
-    ? ((a.scopeTags || []).length ? (a.scopeTags || []).map(t => `<span class="tag" title="${escapeHtml(scopeTagLabel(t))}">${escapeHtml(t)}</span>`).join(" ") : "Aucune catégorie choisie")
-    : "Tous les contacts";
-  const tableView = `<div class="table-wrap desktop-only"><table><thead><tr><th>Compte</th><th>Profil</th><th>Accès aux contacts</th><th>Dernière connexion</th><th></th></tr></thead><tbody>${accounts.map(a => `<tr>
-        <td class="name-cell"><strong>${escapeHtml(`${a.first || ""} ${a.last || ""}`.trim() || a.email)}</strong><span>${escapeHtml(a.email)}</span></td>
-        <td>${a.profile}</td>
-        <td>${scopeLabel(a)}</td>
-        <td>${a.lastLogin ? new Date(a.lastLogin).toLocaleString("fr-FR") : "Jamais connecté"}</td>
-        <td class="row-actions"><button type="button" class="icon-btn" data-action="edit-account:${a.id}" title="Modifier">✎</button>${a.id !== currentAccount.id ? `<button type="button" class="icon-btn" data-action="delete-account:${a.id}" title="Supprimer">✕</button>` : ""}</td>
-      </tr>`).join("")}</tbody></table></div>
-    <div class="record-cards mobile-only">${accounts.map(a => `<div class="record-card">
-        <div class="record-card-head"><strong>${escapeHtml(`${a.first || ""} ${a.last || ""}`.trim() || a.email)}</strong><span>${a.profile}</span></div>
-        <p>${escapeHtml(a.email)}</p>
-        <p>${scopeLabel(a)}</p>
-        <div class="row-actions"><button type="button" data-action="edit-account:${a.id}">Modifier</button>${a.id !== currentAccount.id ? `<button type="button" data-action="delete-account:${a.id}">Supprimer</button>` : ""}</div>
-      </div>`).join("")}</div>`;
-  return `<section class="panel"><div class="toolbar"><h2>Comptes</h2>${action("Ajouter un compte", "add-user", "primary-btn")}</div>
-    <p class="muted-note">Chaque personne se connecte avec son propre email et mot de passe. L'accès aux contacts peut être limité par catégorie (étiquette ou segment).</p>
-    ${accounts.length ? tableView : emptyState("Aucun compte pour l'instant.", "Ajouter un compte", "add-user")}
-  </section>`;
-}
 
-function auditView() {
-  return `<section class="panel pad"><h2>Journal d'activité</h2>${auditLog.length ? `<div class="timeline">${auditLog.map(a=>`<div class="timeline-item"><strong>${a.date}</strong><p>${escapeHtml(a.text)} — ${escapeHtml(a.user)}</p></div>`).join("")}</div>` : emptyState("Aucune activité enregistrée pour l'instant.")}</section>`;
-}
 
 function render() {
   rebuildIndexes();
-  closeFabMenu();
+  closeMenu();
+  if (state.showDetail && !recordById(state.selectedRecord)) { state.showDetail = false; state.mobileDetailOpen = false; }
+  if (state.view === "admin" && currentAccount?.profile !== "Administrateur") { state.view = "home"; state.section = "Accueil"; }
   setHeader();
   renderNav();
-  const views = { home, stats, crm, pay: paymentsView, imports: importsView, apps: appsView, settings: settingsView, admin };
+  const views = { home, stats, crm, follow, pay: paymentsView, imports: importsView, settings: settingsView, admin };
   content().innerHTML = (views[state.view] || home)();
   renderDrawer();
   bind();
   syncBottomNav();
-  // La fiche contact est reconstruite à chaque render() (son scroll
-  // repart donc de toute façon à 0) : on la recale sans animation sur la
-  // section visée par state.tab, pour respecter une navigation faite
-  // ailleurs (ex. "voir ses paiements") sans à-coup visuel.
-  if (state.showDetail) scrollDetailToSection(state.tab, false);
-  // Sur mobile, la fiche contact prend tout l'écran (voir styles.css) ;
-  // on masque la barre de navigation du bas et le bouton "+" flottant
-  // pendant ce temps, pour que ça se comporte comme une vraie page à part
-  // plutôt qu'un panneau qui laisse deviner le reste de l'appli dessous.
-  document.body.classList.toggle("detail-fullscreen", !!(state.showDetail && state.mobileDetailOpen));
+  // Sur téléphone, la fiche d'un contact se comporte comme une page à part :
+  // la barre de navigation du bas est masquée tant qu'elle est ouverte.
+  document.body.classList.toggle("detail-fullscreen", !!state.showDetail);
+  if (state.showDetail && state.scrollToTab) scrollDetailToSection(state.scrollToTab, false);
+  state.scrollToTab = null;
+  state.pendingRender = false;
+  syncUrl();
 }
 
 /* ---------- 7. Fiche détail ------------------------------------------- */
@@ -2653,57 +2651,8 @@ function render() {
 // (scrollIntoView) plutôt que de cacher 5 sections sur 6 derrière des
 // onglets. state.tab garde son rôle (quelle section cibler) mais ne
 // contrôle plus ce qui s'affiche — tout est toujours affiché.
-const DETAIL_SECTIONS = [
-  ["Details", "Détails"],
-  ["Activité", "Activité"],
-  ["Tâches", "Tâches"],
-  ["Paiements", "Paiements"],
-  ["Categorisation", "Détails +"],
-  ["Relations", "Relations"],
-];
 
-function recordDetail(r) {
-  // Pas de cercle d'initiale (retiré à la demande) ; le ✕ en haut à droite
-  // est remplacé par une flèche retour en haut à gauche, à portée du pouce
-  // et sous la barre de statut du téléphone, qui ramène à l'écran d'où la
-  // fiche a été ouverte (voir state.detailReturn dans open-record).
-  return `<aside class="panel detail-card">
-    <div class="detail-head">
-      <button class="detail-back" type="button" data-action="close-detail" title="Revenir à l'écran précédent"><span aria-hidden="true">‹</span>Retour</button>
-      <div class="detail-title"><span class="eyebrow">${r.kind}</span><h2>${escapeHtml(r.name)}</h2><p>${r.id}</p></div>
-    </div>
-    ${isRecordDuplicated(r.id) ? `<div class="dup-alert"><span>⚠ Doublon potentiel détecté</span>${action("Voir les doublons", `dedupe-focus:${r.id}`)}</div>` : ""}
-    <div class="detail-kpis">
-      <div><strong>${euro(recordTotalAmount(r))}</strong><span>Total</span></div>
-      <div><strong>${recordPaymentsCount(r)}</strong><span>Paiements</span></div>
-      <div><strong>${recordInteractionsCount(r)}</strong><span>Interactions</span></div>
-    </div>
-    <div class="quick-actions">
-      ${action("+ Interaction", `quick-interaction:${r.id}`)}
-      ${action("+ Don", `quick-payment:${r.id}`)}
-      ${action("+ Tâche", `quick-task:${r.id}`)}
-      ${action("+ Commentaire", `quick-comment:${r.id}`)}
-      ${action(isInMyPortfolio(r) ? "★ Dans mon portefeuille" : "+ Ajouter à mon portefeuille", `toggle-portfolio:${r.id}`)}
-    </div>
-    <div class="tabs detail-jumpnav">${DETAIL_SECTIONS.map(([key, label]) => `<button type="button" class="tab-btn ${state.tab === key ? "active" : ""}" data-tab="${key}">${label}</button>`).join("")}</div>
-    <div class="detail-body">${recordDetailSections(r)}
-    <div class="row-actions detail-actions">${action("Modifier toute la fiche", "edit-record", "primary-btn")} ${action("Supprimer", "delete-record")}</div></div>
-  </aside>`;
-}
 
-// Cases de la fiche : chacune est un bouton qui ouvre la modification de la
-// fiche directement sur le bon champ (avant, on ne pouvait rien toucher
-// depuis "Détails +" ou "Relations" sans passer par "Modifier toute la
-// fiche" tout en bas). Case vide : "Ajouter" au lieu d'un simple tiret.
-function fieldGrid(rows) {
-  return `<div class="field-grid">${rows.map(([label, value, key, hint]) => {
-    const empty = !String(value ?? "").trim();
-    return `<button type="button" class="field field-edit${empty ? " field-empty" : ""}" data-action="edit-record:${key}" title="Modifier">
-      <span>${escapeHtml(label)}</span>
-      <strong>${empty ? "+ Ajouter" : escapeHtml(value)}</strong>${hint ? `<em class="field-hint">${escapeHtml(hint)}</em>` : ""}
-    </button>`;
-  }).join("")}</div>`;
-}
 function birthdayHint(r) {
   if (!parseDob(r.dob)) return "";
   const today = todayIso();
@@ -2713,79 +2662,15 @@ function birthdayHint(r) {
   return [civil && `Prochain anniversaire civil : ${fmt(civil)}`, heb && `hébraïque : ${fmt(heb)}`].filter(Boolean).join(" · ");
 }
 
-function detailSection(key, label, bodyHtml) {
-  return `<section class="detail-section" data-section="${key}"><h3 class="detail-section-title">${escapeHtml(label)}</h3>${bodyHtml}</section>`;
-}
 
-function recordDetailSections(r) {
-  const detailsBody = (() => {
-    const isStruct = r.kind === "Structure";
-    const body = isStruct
-      ? [["Nom", r.name, "name"], ["Email", r.email, "email"], ["Téléphone", r.phone, "phone"], ["Adresse", r.address, "address"], ["SIREN", r.siren, "siren"], ["Forme juridique", r.legal, "legal"]]
-      : [["Civilité", r.civility, "civility"], ["Nom", r.name, "last"], ["Email", r.email, "email"], ["Email secondaire", r.secondaryEmails, "secondaryEmails"], ["Téléphone", r.phone, "phone"], ["Téléphone 2", r.phone2, "phone2"], ["Adresse", r.address, "address"], ["Ville", r.city, "city"], ["Date de naissance", parseDob(r.dob) || r.dob ? dobLabel(r) : "", "dob", birthdayHint(r)]];
-    body.push(["Commentaire", r.comment, "comment"]);
-    return fieldGrid(body);
-  })();
-  const activiteBody = (() => {
-    const feed = recordLiveInteractions(r.id);
-    const importedNote = r.importedInteractionsCount ? `<p class="muted-note">+ ${r.importedInteractionsCount} interaction(s) historiques importées avant le CRM.</p>` : "";
-    const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une interaction", `quick-interaction:${r.id}`, "primary-btn")}</div>`;
-    return `${addBtn}${importedNote}${feed.length ? `<div class="timeline">${feed.map(i => `<div class="timeline-item"><strong>${i.type === "Commentaire" ? "Commentaire" : i.type}${i.label ? " — " + escapeHtml(i.label) : ""}</strong>${i.note ? `<p>${escapeHtml(i.note)}</p>` : ""}<span class="timeline-date">${i.date} · ${escapeHtml(i.user)}</span></div>`).join("")}</div>` : emptyState("Aucune interaction ou commentaire enregistré pour l'instant.")}`;
-  })();
-  const tachesBody = (() => {
-    const recTasks = tasks.filter(t => t.recordId === r.id).sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
-    const openTasks = recTasks.filter(t => t.status !== "fait");
-    const doneTasks = recTasks.filter(t => t.status === "fait");
-    const addBtn = `<div class="row-actions tab-actions">${action("+ Ajouter une tâche", `quick-task:${r.id}`, "primary-btn")}</div>`;
-    return `${addBtn}${recTasks.length ? `<div class="hp-task-list">${openTasks.map(t => hpTaskRow(t)).join("")}${doneTasks.map(t => hpTaskRow(t)).join("")}</div>` : emptyState("Aucune tâche pour cette fiche pour l'instant.")}`;
-  })();
-  const paiementsBody = (() => {
-    const feed = recordLivePayments(r.id);
-    const importedNote = r.importedAmount ? `<p class="muted-note">+ ${euro(r.importedAmount)} sur ${r.importedPaymentsCount || 0} paiement(s) historiques importés avant le CRM.</p>` : "";
-    // Chaque don/paiement peut être modifié (ex : passer son Statut de
-    // "Promis" à "Reçu" une fois l'argent effectivement arrivé) ou supprimé, directement
-    // depuis cette liste — jusqu'ici impossible une fois le paiement ajouté.
-    return `${importedNote}${feed.length ? `<div class="timeline">${feed.map(p => paymentTimelineItem(p)).join("")}</div>` : emptyState("Aucun don enregistré pour l'instant.")}`;
-  })();
-  const categorisationBody = (() => {
-    const body = [["Étiquettes", (r.tags||[]).join(", "), "tags"], ["Segments", (r.segments||[]).join(", "), "segments"], ["Groupes", (r.groups||[]).join(", "), "groups"], ["Portefeuille", r.agent, "agent"], ["Source", r.source, "source"], ["Adresse", r.address, "address"], ["Ville", r.city, "city"], ["Code postal", r.zip, "zip"], ["Pays", r.country, "country"]];
-    return fieldGrid(body);
-  })();
-  const relationsBody = (() => {
-    const links = linkages.filter(l => l.a === r.name || l.b === r.name);
-    const body = [["Rôle de foyer", r.role, "role"], ["Type de foyer", r.householdType, "householdType"], ["Statut parent", r.parentStatus, "parentStatus"], ["Statut enfant", r.childStatus, "childStatus"], ["Profession", r.profession, "profession"], ["École actuelle", r.school, "school"], ["Famille", r.family, "family"]];
-    return `${fieldGrid(body)}${links.length ? `<div class="timeline">${links.map(l=>`<div class="timeline-item"><strong>${escapeHtml(l.a)} ↔ ${escapeHtml(l.b)}</strong><p>${l.type}</p></div>`).join("")}</div>` : ""}${action("Ajouter une liaison", `add-linkage:${r.id}`)}`;
-  })();
-  return [
-    detailSection("Details", "Détails", detailsBody),
-    detailSection("Activité", "Activité", activiteBody),
-    detailSection("Tâches", "Tâches", tachesBody),
-    detailSection("Paiements", "Paiements", paiementsBody),
-    detailSection("Categorisation", "Détails +", categorisationBody),
-    detailSection("Relations", "Relations", relationsBody),
-  ].join("");
-}
 
-// Fait défiler le panneau de la fiche jusqu'à la section visée. smooth=true
-// pour un clic explicite sur une pastille ; smooth=false pour le recalage
-// silencieux juste après un rendu complet (évite une animation qui rejoue
-// à chaque frappe pendant qu'une fiche est ouverte).
+// Fait défiler la fiche jusqu'à la section visée (pastilles en haut de la
+// fiche sur téléphone, ou retour sur la fiche après un ajout).
 function scrollDetailToSection(key, smooth) {
   if (!key) return;
-  const card = document.querySelector(".detail-card");
-  if (!card) return;
-  // "Details" est la toute première section : viser cette section précise
-  // scrollerait juste SOUS l'en-tête (avatar/nom/KPIs/pastilles), qui
-  // disparaîtrait alors du haut de l'écran à chaque ouverture de fiche. On
-  // vise plutôt le haut de la fiche entière dans ce cas.
-  const target = key === "Details" ? card : card.querySelector(`[data-section="${key}"]`);
-  if (!target) return;
-  // Sur mobile, le bandeau (Retour + nom) reste collé en haut de la fiche :
-  // sans cette marge, le titre de la section visée passait dessous.
-  const head = card.querySelector(".detail-head");
-  const stickyHead = head && getComputedStyle(head).position === "sticky";
-  if (target !== card) target.style.scrollMarginTop = `${(stickyHead ? head.offsetHeight : 0) + 8}px`;
-  target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+  if (key === "Details") { window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" }); return; }
+  const target = document.querySelector(`.record-page [data-section="${key}"]`);
+  if (target) target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
 }
 
 /* ---------- 8. Navigation & tiroir mobile ------------------------------- */
@@ -2803,58 +2688,10 @@ function closeNav() {
   syncBottomNav();
 }
 
-// Barre de navigation mobile (bas d'écran) : 2 destinations de chaque côté du
-// bouton menu (☰), qui ouvre le même tiroir de navigation complet que sur
-// desktop. On surligne la destination active sans reconstruire le DOM (les
-// boutons sont statiques dans index.html, jamais recréés par render()).
-function bottomNavKey() {
-  if (state.view === "home") return "home";
-  if (state.view === "pay") return "payments";
-  if (state.view === "crm" && state.section === "Interactions") return "interactions";
-  if (state.view === "crm") return "contacts";
-  return "";
-}
-function syncBottomNav() {
-  const activeKey = bottomNavKey();
-  document.querySelectorAll(".bnav-btn[data-bnav]").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.bnav === activeKey);
-  });
-  document.querySelector("#bnavMenu")?.classList.toggle("active", !!state.navOpen);
-}
 
-// Menu rapide du bouton "+" flottant : accessible depuis n'importe quel écran
-// (pas seulement depuis la fiche d'un contact), pour répondre au besoin de
-// pouvoir logger une interaction "en direct, rapide" sans naviguer.
-function buildFabMenu() {
-  const menu = document.querySelector("#fabMenu");
-  if (!menu) return;
-  // Mêmes clés d'action que les boutons de l'accueil et des listes : un seul
-  // chemin (handleAction) pour "Nouveau contact" & co., où qu'on clique.
-  menu.innerHTML = `
-    <button type="button" data-fab-action="add-interaction">Interaction</button>
-    <button type="button" data-fab-action="add-payment:Don">Don / paiement</button>
-    <button type="button" data-fab-action="add-comment">Commentaire</button>
-    <button type="button" data-fab-action="add-contact">Nouveau contact</button>
-    <button type="button" data-fab-action="add-structure">Nouvelle structure</button>
-  `;
-  menu.querySelectorAll("[data-fab-action]").forEach(btn => btn.addEventListener("click", () => { closeFabMenu(); handleAction(btn.dataset.fabAction); }));
-  document.querySelector("#fabScrim")?.addEventListener("click", closeFabMenu);
-}
-function openFabMenu() {
-  document.querySelector("#fabMenu")?.classList.add("open");
-  document.querySelector("#fabScrim")?.classList.add("show");
-}
-function closeFabMenu() {
-  document.querySelector("#fabMenu")?.classList.remove("open");
-  document.querySelector("#fabScrim")?.classList.remove("show");
-}
-function toggleFabMenu() {
-  if (document.querySelector("#fabMenu")?.classList.contains("open")) closeFabMenu(); else openFabMenu();
-}
 
-// Libellés/catégories d'interaction personnalisables (Paramètres > Catégories).
-function addInteractionCategory() {
-  const name = (window.prompt("Nom de la nouvelle catégorie (ex : Chiour)") || "").trim();
+async function addInteractionCategory() {
+  const name = await uiPrompt("Nom de la nouvelle catégorie", "", { title: "Nouvelle catégorie", placeholder: "Ex : Chiour" });
   if (!name) return;
   if (interactionCategories.some(c => c.toLowerCase() === name.toLowerCase())) { notify("Cette catégorie existe déjà"); return; }
   interactionCategories.push(name);
@@ -2872,12 +2709,12 @@ function renameInteractionCategory(index, newName) {
   logAudit(`Catégorie renommée : ${oldName} → ${name}.`);
   saveCrmData();
 }
-function deleteInteractionCategory(index) {
+async function deleteInteractionCategory(index) {
   const name = interactionCategories[index];
   if (!name) return;
   if (interactionCategories.length <= 1) { notify("Il doit rester au moins une catégorie"); return; }
   const used = interactions.filter(i => i.category === name).length;
-  if (used && !window.confirm(`${used} interaction(s) utilisent "${name}". La supprimer quand même ? Ces interactions garderont ce libellé en texte.`)) return;
+  if (used && !await uiConfirm(`${used} interaction(s) utilisent « ${name} ». Elles garderont ce libellé, seule la liste de choix change.`, { title: "Supprimer la catégorie", danger: true, okLabel: "Supprimer" })) return;
   interactionCategories.splice(index, 1);
   logAudit(`Catégorie d'interaction supprimée : ${name}.`);
   saveCrmData();
@@ -2885,14 +2722,15 @@ function deleteInteractionCategory(index) {
 }
 
 function renderDrawer() {
+  document.querySelector("#drawerScrim")?.classList.toggle("show", !!state.drawer);
   if (!state.drawer) { drawerEl().className = "drawer"; drawerEl().innerHTML = ""; return; }
   drawerEl().className = "drawer open";
   const views = {
-    actions: `<h2>Actions</h2>${action("Exporter la vue", "export-current", "primary-btn")}${action("Détecter les doublons", "dedupe")}${action("Fermer", "close-drawer")}`,
-    dedupe: `<h2>Doublons potentiels</h2>${dedupeDrawerBody()}${action("Fermer", "close-drawer")}`,
-    filters: `<h2>Filtres</h2>${filtersDrawerBody()}${action("Fermer", "close-drawer")}`,
+    dedupe: ["Doublons potentiels", dedupeDrawerBody()],
+    filters: ["Filtres", filtersDrawerBody()],
   };
-  drawerEl().innerHTML = `<button class="drawer-close" type="button" data-action="close-drawer">✕</button>${views[state.drawer] || ""}`;
+  const [title, body] = views[state.drawer] || ["", ""];
+  drawerEl().innerHTML = `<header class="drawer-head"><h2>${title}</h2><button class="icon-btn" type="button" data-action="close-drawer" title="Fermer">${icon("x")}</button></header><div class="drawer-body">${body}</div>`;
 }
 
 // Tiroir "Doublons potentiels" : soit une recherche libre sur tous les
@@ -2947,22 +2785,10 @@ function dedupeRecordRow(r, g) {
 }
 
 function bind() {
-  document.querySelectorAll("[data-view]").forEach(el => el.addEventListener("click", () => {
-    state.view = el.dataset.view;
-    state.section = el.dataset.section || titles[state.view][0];
-    state.query = "";
-    state.filters = defaultFilters();
-    state.drawer = null;
-    state.showDetail = true;
-    state.mobileDetailOpen = false;
-    closeNav();
-    render();
-  }));
-  document.querySelectorAll("[data-action]").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); handleAction(el.dataset.action); }));
   // Lignes de tableau cliquables (<tr data-action>) : pas des boutons, donc
   // inatteignables au clavier et muettes pour un lecteur d'écran. On les rend
   // focalisables et activables avec Entrée/Espace.
-  document.querySelectorAll("tr[data-action], div[data-action], tr[data-record]").forEach(el => {
+  document.querySelectorAll("#content tr[data-action], #content div[data-action], #content tr[data-record]").forEach(el => {
     el.tabIndex = 0;
     el.setAttribute("role", "button");
     el.addEventListener("keydown", e => {
@@ -2971,7 +2797,6 @@ function bind() {
       el.click();
     });
   });
-  document.querySelectorAll("[data-record]").forEach(el => el.addEventListener("click", () => { state.selectedRecord = el.dataset.record; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details"; render(); scrollToTop(); }));
   // Les pastilles de la fiche contact ne reconstruisent plus toute la page :
   // tout est déjà affiché (une seule page qui défile), donc un clic se
   // contente de faire défiler jusqu'à la section et de déplacer la
@@ -3042,8 +2867,8 @@ function bind() {
     const linkedName = document.querySelector("#hpTaskLinkedName");
     const unlinkBtn = document.querySelector("#hpTaskUnlink");
     const createBtn = document.querySelector("#hpTaskCreateContact");
-    createBtn?.addEventListener("click", () => {
-      const name = (window.prompt("Nom du nouveau contact à lier (ex : Prénom Nom)") || "").trim();
+    createBtn?.addEventListener("click", async () => {
+      const name = await uiPrompt("Prénom et nom du nouveau contact à lier", "", { title: "Nouveau contact", placeholder: "Prénom Nom", okLabel: "Créer et lier" });
       if (!name) return;
       const rec = quickCreateContact(name);
       if (!rec) return;
@@ -3108,6 +2933,14 @@ function bind() {
       try { await apiSetPushPrefs(true, pushState.time); } catch { /* reseau indisponible : reessaiera au prochain changement */ }
     }
   });
+  document.querySelector("#auditSearch")?.addEventListener("input", e => {
+    const cursor = e.target.selectionStart || e.target.value.length;
+    state.auditQuery = e.target.value;
+    render();
+    const next = document.querySelector("#auditSearch");
+    next?.focus();
+    next?.setSelectionRange(cursor, cursor);
+  });
   document.querySelector("#pageSearch")?.addEventListener("input", e => {
     const cursor = e.target.selectionStart || e.target.value.length;
     state.query = e.target.value;
@@ -3128,22 +2961,50 @@ function bind() {
   });
 }
 
-// filtersOverride permet d'arriver sur Contacts avec un segment déjà appliqué
-// (voir applySegment ci-dessous) au lieu de toujours repartir de filtres vides.
 function navigate(view, section, filtersOverride) {
   state.view = view;
-  state.section = section;
+  state.section = section || defaultSection(view);
   state.query = "";
   state.filters = filtersOverride || defaultFilters();
+  state.quick = "";
+  state.selection.clear();
+  state.payFilters = { type: "", year: "", status: "", method: "" };
   state.drawer = null;
-  state.showDetail = true;
-  // Par défaut, une navigation "générale" (menu, "Voir les interactions"...)
-  // n'ouvre pas explicitement une fiche précise sur mobile ; open-record
-  // remet ce drapeau à true juste après avoir appelé navigate().
+  state.showDetail = false;
   state.mobileDetailOpen = false;
+  state.detailReturn = null;
   state.recordsPage = PAGE_STEP;
   state.paymentsPage = PAGE_STEP;
   render();
+}
+// Ouvre la fiche d'un contact ou d'une structure en pleine page, en gardant
+// en mémoire l'écran d'où l'on vient pour le bouton Retour.
+function openRecord(id, tab) {
+  const r = records.find(x => x.id === id);
+  if (!r) return notify("Fiche introuvable");
+  if (!(state.view === "crm" && state.showDetail)) state.detailReturn = { view: state.view, section: state.section, scrollY: window.scrollY };
+  state.view = "crm";
+  state.section = r.kind === "Structure" ? "Structures" : "Contacts";
+  state.selectedRecord = r.id;
+  state.showDetail = true;
+  state.mobileDetailOpen = true;
+  state.drawer = null;
+  state.tab = tab || "Details";
+  state.scrollToTab = tab && tab !== "Details" ? tab : null;
+  render();
+  if (!state.tab || state.tab === "Details") scrollToTop();
+}
+function closeRecord() {
+  const back = state.detailReturn;
+  state.detailReturn = null;
+  state.showDetail = false;
+  state.mobileDetailOpen = false;
+  if (back) { state.view = back.view; state.section = back.section; }
+  render();
+  window.scrollTo(0, back ? back.scrollY || 0 : 0);
+}
+function myFirstName() {
+  return currentAccount ? (currentAccount.first || (currentAccount.email || "").split("@")[0]) : "";
 }
 // Remonte en haut de la page après ouverture d'une fiche. Sur mobile, la fiche
 // et la liste sont empilées dans une seule colonne (et la liste peut compter
@@ -3156,97 +3017,102 @@ function scrollToTop() {
 
 /* ---------- 9. Modales & actions rapides -------------------------------- */
 
-function handleAction(key) {
+function handleAction(key, el) {
   if (!key) return;
   if (isReadOnlyAccount() && WRITE_ACTION_RE.test(key)) return notify(READ_ONLY_MSG);
-  // "open-record:<id>" ouvre la fiche sur l'onglet Détails ; "open-record:<id>:<Onglet>"
-  // ouvre directement sur l'onglet pertinent (ex : un clic sur un don ouvre la fiche
-  // sur "Paiements", un clic sur une interaction l'ouvre sur "Activité") pour qu'on
-  // retrouve tout de suite ce qu'on est venu voir, et qu'on puisse le suivre / le
-  // mettre à jour sans re-naviguer soi-même dans les onglets.
-  if (key.startsWith("open-record:")) {
-    const [, id, tab] = key.split(":");
-    if (recordById(id)) {
-      // Mémorise l'écran d'origine (accueil, paiements...) pour que la
-      // flèche "Retour" de la fiche y ramène, au même endroit de la page,
-      // plutôt que sur la liste des contacts.
-      const fromList = state.view === "crm" && ["Contacts", "Structures"].includes(state.section);
-      if (!fromList) state.detailReturn = { view: state.view, section: state.section, scrollY: window.scrollY };
-      else if (!state.mobileDetailOpen) state.detailReturn = null;
-      navigate("crm", recordById(id).kind === "Structure" ? "Structures" : "Contacts");
-      state.selectedRecord = id;
-      state.showDetail = true;
-      state.mobileDetailOpen = true;
-      state.tab = tab || "Details";
-      render();
-      scrollToTop();
+  const [name, ...args] = key.split(":");
+  const arg = args[0];
+  switch (name) {
+    // "open-record:<id>" ouvre la fiche ; "open-record:<id>:<Section>" l'ouvre
+    // directement sur la section utile (un clic sur un don -> "Paiements").
+    case "open-record": return openRecord(arg, args[1]);
+    case "goto": return (navigate(arg, args.slice(1).join(":") || defaultSection(arg)), scrollToTop());
+    case "download-receipt-pdf": return downloadReceiptPdf(arg);
+    case "regenerate-receipt": return regenerateReceipt(arg);
+    case "quick-interaction": return openQuickForRecord(arg, "interaction");
+    case "quick-payment": return openQuickForRecord(arg, "payment");
+    case "quick-pledge": return openQuickForRecord(arg, "payment", { status: "Promis" });
+    case "quick-comment": return openQuickForRecord(arg, "comment");
+    case "quick-task": return openQuickForRecord(arg, "task");
+    case "add-payment": return openModal("payment", { type: arg || "Don" });
+    case "add-pledge": return openModal("payment", { status: "Promis" });
+    case "add-task": return openModal("task");
+    case "toggle-panel": {
+      collapsedPanels = collapsedPanels.includes(arg) ? collapsedPanels.filter(x => x !== arg) : [...collapsedPanels, arg];
+      try { localStorage.setItem(PANELS_KEY, JSON.stringify(collapsedPanels)); } catch { /* stockage indisponible */ }
+      return render();
     }
-    return;
+    case "bday-scope": state.birthdayScope = arg; return render();
+    case "bday-month": {
+      const step = Number(arg);
+      const cur = state.birthdayMonth || todayIso().slice(0, 7);
+      const [y, m] = cur.split("-").map(Number);
+      state.birthdayMonth = step === 0 ? null : new Date(Date.UTC(y, m - 1 + step, 1)).toISOString().slice(0, 7);
+      return render();
+    }
+    // "edit-record:<champ>" : clic sur une case de la fiche -> ouvre la
+    // modification de la fiche directement sur ce champ.
+    case "edit-record": {
+      openModal("editRecord");
+      if (arg) {
+        const input = dialogContent().querySelector(`[name="${arg}"]`);
+        if (input) { input.scrollIntoView({ block: "center" }); setTimeout(() => input.focus(), 50); }
+      }
+      return;
+    }
+    case "add-linkage": return openModal("linkage", { recordId: arg });
+    case "delete-linkage": return deleteLinkage(arg);
+    case "apply-legacy-segment": return navigate("crm", "Contacts", { ...defaultFilters(), segments: [decodeURIComponent(key.slice("apply-legacy-segment:".length))] });
+    case "apply-tag": return navigate("crm", "Contacts", { ...defaultFilters(), tags: [decodeURIComponent(key.slice("apply-tag:".length))] });
+    case "apply-saved-segment": { const seg = savedViews.find(s => s.id === arg); if (seg) applySegment(seg); return; }
+    case "delete-saved-segment": return deleteSavedSegment(arg);
+    case "open-group": { navigate("crm", "Contacts"); state.query = decodeURIComponent(key.slice("open-group:".length)); return render(); }
+    case "notify-app": return notify(`${arg} n'est pas encore connecté au CRM.`);
+    case "delete-category": return deleteInteractionCategory(Number(arg));
+    case "delete-field": return deleteCustomField(decodeURIComponent(key.slice("delete-field:".length)));
+    case "edit-account": { const acc = accounts.find(a => a.id === arg); if (acc) openModal("account", { existing: acc }); return; }
+    case "delete-account": return deleteAccount(arg);
+    case "toggle-task": return toggleTaskDone(arg);
+    case "edit-task": return openEditTask(arg);
+    case "delete-task": return deleteHomeTask(arg);
+    case "task-scope": state.taskScope = arg; return render();
+    case "edit-payment": return openEditPayment(arg);
+    case "delete-payment": return deletePayment(arg);
+    case "add-installment": return openAddInstallment(arg);
+    case "mark-received": return markPaymentReceived(arg);
+    case "pay-type": state.payFilters.type = arg || ""; state.paymentsPage = PAGE_STEP; return render();
+    case "holiday-prepare": return openHolidayModal(arg);
+    case "portfolio-touch": return openPortfolioTouch(arg);
+    case "toggle-portfolio": return togglePortfolio(arg);
+    case "quick-filter": state.quick = arg || ""; state.recordsPage = PAGE_STEP; state.selection.clear(); return render();
+    case "sort": {
+      state.sort = state.sort.key === arg ? { key: arg, dir: state.sort.dir === "asc" ? "desc" : "asc" } : { key: arg, dir: arg === "name" ? "asc" : "desc" };
+      state.recordsPage = PAGE_STEP;
+      return render();
+    }
+    case "export-records": return exportTable(state.section === "Structures" ? "structures" : "contacts", recordExportColumns(), sortedRecords(state.section === "Structures" ? "Structure" : "Contact"), arg);
+    case "export-payments": return exportTable("paiements", paymentExportColumns(), filteredPayments(), arg);
+    case "log-contact": {
+      const rec = recordById(args[1]);
+      if (!rec || isReadOnlyAccount()) return;
+      return notify(`${arg} — ${rec.name}`, false, { label: "Consigner l'échange", run: () => openQuickForRecord(rec.id, "interaction", { type: arg }) });
+    }
+    case "delete-interaction": return deleteInteraction(arg);
+    case "edit-campaign": return openModal("campaign", { existing: campaigns.find(c => c.id === arg) });
+    case "delete-campaign": return deleteCampaign(arg);
+    case "archive-campaign": { const c = campaigns.find(x => x.id === arg); if (c) { c.archived = !c.archived; logAudit(`Campagne ${c.archived ? "archivée" : "réactivée"} : ${c.name}.`); saveCrmData(); render(); } return; }
+    case "open-campaign": { navigate("pay", "Tous les paiements"); state.query = decodeURIComponent(key.slice("open-campaign:".length)); return render(); }
+    case "stats-year": state.statsYear = arg || ""; return render();
+    case "receipts-filter": state.receiptsFilter = arg || ""; state.paymentsPage = PAGE_STEP; return render();
+    case "interaction-filter": state.interactionFilter = decodeURIComponent(key.slice("interaction-filter:".length)); return render();
+    // Actions du tiroir "Doublons potentiels" : la clé du groupe est encodée
+    // puis suivie de "§<idFiche>", car elle contient elle-même des ":".
+    case "dedupe-merge": { const [gk, id] = key.slice("dedupe-merge:".length).split("§"); return mergeDuplicateGroup(decodeURIComponent(gk), id); }
+    case "dedupe-separate": { const [gk, id] = key.slice("dedupe-separate:".length).split("§"); return separateDuplicateRecord(decodeURIComponent(gk), id); }
+    case "dedupe-delete": { const [gk, id] = key.slice("dedupe-delete:".length).split("§"); return deleteDuplicateRecord(decodeURIComponent(gk), id); }
+    case "dedupe-focus": state.drawer = "dedupe"; state.dedupeFocusId = arg; state.dedupeQuery = ""; return render();
+    default: break;
   }
-  if (key.startsWith("download-receipt-pdf:")) return downloadReceiptPdf(key.split(":")[1]);
-  if (key.startsWith("regenerate-receipt:")) return regenerateReceipt(key.split(":")[1]);
-  if (key.startsWith("quick-interaction:")) return openQuickForRecord(key.split(":")[1], "interaction");
-  if (key.startsWith("quick-payment:")) return openQuickForRecord(key.split(":")[1], "payment");
-  if (key.startsWith("quick-comment:")) return openQuickForRecord(key.split(":")[1], "comment");
-  if (key.startsWith("quick-task:")) return openQuickForRecord(key.split(":")[1], "task");
-  if (key.startsWith("add-payment:")) return openModal("payment", { type: key.split(":")[1] || "Don" });
-  if (key.startsWith("toggle-panel:")) {
-    const k = key.split(":")[1];
-    collapsedPanels = collapsedPanels.includes(k) ? collapsedPanels.filter(x => x !== k) : [...collapsedPanels, k];
-    try { localStorage.setItem(PANELS_KEY, JSON.stringify(collapsedPanels)); } catch { /* stockage indisponible */ }
-    render();
-    return;
-  }
-  if (key.startsWith("bday-scope:")) { state.birthdayScope = key.split(":")[1]; render(); return; }
-  if (key.startsWith("bday-month:")) {
-    const step = Number(key.split(":")[1]);
-    const cur = state.birthdayMonth || todayIso().slice(0, 7);
-    const [y, m] = cur.split("-").map(Number);
-    const d = new Date(Date.UTC(y, m - 1 + step, 1));
-    state.birthdayMonth = step === 0 ? null : d.toISOString().slice(0, 7);
-    render();
-    return;
-  }
-  // "edit-record:<champ>" : clic sur une case de la fiche -> ouvre la
-  // modification de la fiche directement sur ce champ.
-  if (key.startsWith("edit-record:")) {
-    openModal("editRecord");
-    const input = dialogContent().querySelector(`[name="${key.split(":")[1]}"]`);
-    if (input) { input.scrollIntoView({ block: "center" }); setTimeout(() => input.focus(), 50); }
-    return;
-  }
-  if (key.startsWith("add-linkage:")) return openModal("linkage", { recordId: key.split(":")[1] });
-  // "apply-legacy-segment:<étiquette encodée>" (chip des segments historiques
-  // de la page Segments) applique désormais un vrai filtre "segments" (qui ne
-  // retient que les fiches portant cette étiquette dans record.segments) au
-  // lieu de l'ancien comportement : une recherche texte libre sur le nom du
-  // segment, qui ratait toute fiche ne contenant pas littéralement ce texte.
-  if (key.startsWith("apply-legacy-segment:")) { navigate("crm", "Contacts", { ...defaultFilters(), segments: [decodeURIComponent(key.slice("apply-legacy-segment:".length))] }); return; }
-  if (key.startsWith("apply-saved-segment:")) { const seg = savedViews.find(s => s.id === key.split(":")[1]); if (seg) applySegment(seg); return; }
-  if (key.startsWith("delete-saved-segment:")) { return deleteSavedSegment(key.split(":")[1]); }
-  if (key.startsWith("notify-app:")) return notify(`Nous vous préviendrons pour ${key.split(":")[1]} dès que la connexion sera disponible.`);
-  if (key.startsWith("delete-category:")) return deleteInteractionCategory(Number(key.split(":")[1]));
-  if (key.startsWith("edit-account:")) { const acc = accounts.find(a => a.id === key.split(":")[1]); if (acc) openModal("account", { existing: acc }); return; }
-  if (key.startsWith("delete-account:")) return deleteAccount(key.split(":")[1]);
-  if (key.startsWith("toggle-task:")) return toggleTaskDone(key.split(":")[1]);
-  if (key.startsWith("edit-task:")) return openEditTask(key.split(":")[1]);
-  if (key.startsWith("delete-task:")) return deleteHomeTask(key.split(":")[1]);
-  if (key.startsWith("edit-payment:")) return openEditPayment(key.split(":")[1]);
-  if (key.startsWith("delete-payment:")) return deletePayment(key.split(":")[1]);
-  if (key.startsWith("add-installment:")) return openAddInstallment(key.split(":")[1]);
-  if (key.startsWith("holiday-prepare:")) return openHolidayModal(key.split(":")[1]);
-  if (key.startsWith("portfolio-touch:")) return openPortfolioTouch(key.split(":")[1]);
-  if (key.startsWith("toggle-portfolio:")) return togglePortfolio(key.split(":")[1]);
-  if (key === "add-to-portfolio") return openAddToPortfolioModal();
-  if (key === "toggle-done-tasks") { state.showDoneTasks = !state.showDoneTasks; render(); return; }
-  // Actions du tiroir "Doublons potentiels" : la clé du groupe (ex : "email:x@y.fr")
-  // est encodée (encodeURIComponent) puis suivie de "§<idFiche>", car la clé
-  // elle-même contient déjà des ":" (email/téléphone) qui casseraient un simple split(":").
-  if (key.startsWith("dedupe-merge:")) { const [gk, id] = key.slice("dedupe-merge:".length).split("§"); return mergeDuplicateGroup(decodeURIComponent(gk), id); }
-  if (key.startsWith("dedupe-separate:")) { const [gk, id] = key.slice("dedupe-separate:".length).split("§"); return separateDuplicateRecord(decodeURIComponent(gk), id); }
-  if (key.startsWith("dedupe-delete:")) { const [gk, id] = key.slice("dedupe-delete:".length).split("§"); return deleteDuplicateRecord(decodeURIComponent(gk), id); }
-  if (key.startsWith("dedupe-focus:")) { state.drawer = "dedupe"; state.dedupeFocusId = key.split(":")[1]; state.dedupeQuery = ""; render(); return; }
-  if (key === "dedupe-clear-focus") { state.dedupeFocusId = null; render(); return; }
 
   const actions = {
     "add-contact": () => openModal("contact"),
@@ -3256,14 +3122,13 @@ function handleAction(key) {
     "add-field": () => openModal("field"),
     "add-group": () => openModal("group"),
     "add-interaction": () => openModal("interaction"),
-    "add-payment": () => openModal("payment"),
-    "add-comment": () => openModal("comment"),
-    "add-linkage": () => openModal("linkage"),
-    "add-receipt-template": () => openModal("receiptTemplate"),
+    "add-campaign": () => openModal("campaign"),
     "add-category": () => addInteractionCategory(),
+    "add-to-portfolio": () => openAddToPortfolioModal(),
     "import-new": () => openImportModal(),
-    "export-current": () => downloadCsv(`export-${state.view}-${todayStr().replace(/\//g,"-")}.csv`, currentRows()),
-    "reset-filters": () => { state.query = ""; state.filters = defaultFilters(); state.recordsPage = PAGE_STEP; state.paymentsPage = PAGE_STEP; render(); },
+    "export-current": () => downloadCsv(`export-${state.section.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-${todayIso()}.csv`, currentRows()),
+    "export-interactions": () => exportInteractions(),
+    "reset-filters": () => { state.query = ""; state.filters = defaultFilters(); state.quick = ""; state.payFilters = { type: "", year: "", status: "", method: "" }; state.recordsPage = PAGE_STEP; state.paymentsPage = PAGE_STEP; render(); },
     // Réinitialise uniquement les filtres avancés (bouton dans le tiroir
     // "Filtres" lui-même) sans effacer la recherche texte ni fermer le tiroir.
     "reset-filters-only": () => { state.filters = defaultFilters(); state.recordsPage = PAGE_STEP; render(); },
@@ -3271,35 +3136,123 @@ function handleAction(key) {
     "send-test-push": () => sendTestPushAndNotify(),
     "load-more-records": () => { state.recordsPage += PAGE_STEP; render(); },
     "load-more-payments": () => { state.paymentsPage += PAGE_STEP; render(); },
-    "open-actions": () => { state.drawer = "actions"; render(); },
     "open-filters": () => { state.drawer = "filters"; render(); },
     "close-drawer": () => { state.drawer = null; render(); },
     "dedupe": () => { state.drawer = "dedupe"; state.dedupeFocusId = null; state.dedupeQuery = ""; render(); },
-    "generate-receipts": () => { let n = 0; payments.forEach(p => { if (p.receipt === "A generer" || p.receipt === "À générer") { logReceiptGeneration(p); n += 1; } }); if (n) { logAudit(`${n} reçu(s) généré(s).`); saveCrmData(); } notify(n ? `${n} reçu(s) généré(s)` : "Aucun reçu en attente"); render(); },
-    "export-receipt-log": () => downloadCsv(`suivi-comptable-cerfa-${todayStr().replace(/\//g,"-")}.csv`, receiptLog),
-    "edit-record": () => openModal("editRecord"),
+    "dedupe-clear-focus": () => { state.dedupeFocusId = null; render(); },
+    "generate-receipts": () => generateMissingReceipts(),
+    "export-receipt-log": () => downloadCsv(`suivi-comptable-cerfa-${todayIso()}.csv`, receiptLog.map(({ id, ...line }) => line)),
     "delete-record": () => deleteSelectedRecord(),
-    "close-detail": () => {
-      const back = state.detailReturn;
-      state.detailReturn = null;
-      if (back) {
-        navigate(back.view, back.section);
-        state.showDetail = false;
-        render();
-        window.scrollTo(0, back.scrollY || 0);
-        return;
-      }
-      state.showDetail = false; state.mobileDetailOpen = false; render();
-    },
-    "open-detail": () => { state.showDetail = true; state.mobileDetailOpen = true; render(); scrollToTop(); },
+    "close-detail": () => closeRecord(),
+    "toggle-done-tasks": () => { state.showDoneTasks = !state.showDoneTasks; render(); },
+    "bulk-tag": () => bulkTag(),
+    "bulk-portfolio": () => bulkPortfolio(),
+    "bulk-delete": () => bulkDelete(),
+    "bulk-clear": () => { state.selection.clear(); render(); },
+    "bulk-emails": () => openEmailModal(selectedRecords(), `Écrire aux ${state.selection.size} contact(s) sélectionné(s)`),
+    "bulk-export": () => exportTable("selection", recordExportColumns(), selectedRecords(), "xlsx"),
+    "email-list": () => openEmailModal(sortedRecords(state.section === "Structures" ? "Structure" : "Contact"), "Écrire aux contacts de cette liste"),
+    "toggle-theme": () => applyTheme(getEffectiveTheme() === "dark" ? "light" : "dark"),
+    "change-password": () => openModal("password"),
+    "download-backup": () => downloadBackup(),
+    "open-palette": () => openPalette(),
+    "logout": () => logout(),
     "goto-receipts": () => navigate("pay", "Reçus"),
-    "goto-interactions": () => navigate("crm", "Interactions"),
+    "goto-interactions": () => navigate("follow", "Interactions"),
     "goto-contacts": () => navigate("crm", "Contacts"),
-    "goto-portfolio": () => navigate("crm", "Portefeuille"),
-    "goto-birthdays": () => { state.birthdayMonth = null; navigate("crm", "Anniversaires"); },
+    "goto-contacts-filters": () => { navigate("crm", "Contacts"); state.drawer = "filters"; render(); },
+    "quick-filter-noemail": () => { navigate("crm", "Contacts"); state.quick = "noemail"; render(); },
+    "noop": () => {},
+    "goto-portfolio": () => navigate("follow", "Portefeuille"),
+    "goto-tasks": () => navigate("follow", "Tâches"),
+    "goto-pledges": () => navigate("pay", "Promesses"),
+    "goto-payments": () => navigate("pay", "Tous les paiements"),
+    "goto-campaigns": () => navigate("pay", "Campagnes"),
+    "goto-stats": () => navigate("stats", "Vue d'ensemble"),
+    "goto-account": () => navigate("settings", "Mon compte"),
+    "goto-lapsed": () => { navigate("crm", "Contacts"); state.quick = "lapsed"; state.sort = { key: "total", dir: "desc" }; render(); },
+    "goto-birthdays": () => { state.birthdayMonth = null; navigate("follow", "Anniversaires"); },
     "goto-audit": () => navigate("admin", "Journal d'activité"),
   };
-  (actions[key] || (() => notify("Fonctionnalité à venir")))();
+  const run = actions[key];
+  if (!run) return;
+  run();
+  if (key.startsWith("goto-")) scrollToTop();
+}
+
+// Un don promis vient d'arriver : il passe "Reçu" à la date du jour et
+// devient éligible au reçu fiscal.
+function markPaymentReceived(id) {
+  const p = payments.find(item => item.id === id);
+  if (!p) return notify("Paiement introuvable");
+  const before = { status: p.status, paymentDate: p.paymentDate, receipt: p.receipt };
+  p.status = "Reçu";
+  p.paymentDate = todayIso();
+  bumpReceiptIfReceived(p);
+  logAudit(`Don marqué reçu : ${euro(p.amount)} de ${p.payer}.`);
+  saveCrmData();
+  render();
+  notify(`${euro(p.amount)} de ${p.payer} marqué reçu`, false, { label: "Annuler", run: () => { Object.assign(p, before); saveCrmData(); render(); } });
+}
+function deleteInteraction(id) {
+  const index = interactions.findIndex(i => i.id === id);
+  if (index < 0) return;
+  const [gone] = interactions.splice(index, 1);
+  logAudit(`Interaction supprimée pour ${recordById(gone.recordId)?.name || gone.target || "un contact"}.`);
+  saveCrmData();
+  render();
+  notify("Interaction supprimée", false, { label: "Annuler", run: () => { interactions.splice(Math.min(index, interactions.length), 0, gone); saveCrmData(); render(); } });
+}
+async function deleteLinkage(id) {
+  const l = linkages.find(x => x.id === id);
+  if (!l) return;
+  if (!await uiConfirm(`Supprimer la liaison entre ${l.a} et ${l.b} ?`, { title: "Supprimer la liaison", danger: true, okLabel: "Supprimer" })) return;
+  linkages = linkages.filter(x => x.id !== id);
+  logAudit(`Liaison supprimée entre ${l.a} et ${l.b}.`);
+  saveCrmData();
+  render();
+}
+async function deleteCampaign(id) {
+  const c = campaigns.find(x => x.id === id);
+  if (!c) return;
+  if (!await uiConfirm(`Supprimer la campagne « ${c.name} » ? Les dons déjà enregistrés gardent leur occasion.`, { title: "Supprimer la campagne", danger: true, okLabel: "Supprimer" })) return;
+  campaigns = campaigns.filter(x => x.id !== id);
+  logAudit(`Campagne supprimée : ${c.name}.`);
+  saveCrmData();
+  render();
+}
+async function deleteCustomField(name) {
+  if (!await uiConfirm(`Supprimer le champ « ${name} » ? Les valeurs déjà saisies sur les fiches sont conservées mais ne seront plus affichées.`, { title: "Supprimer le champ", danger: true, okLabel: "Supprimer" })) return;
+  customFields = customFields.filter(f => f.name !== name);
+  logAudit(`Champ personnalisé supprimé : ${name}.`);
+  saveCrmData();
+  render();
+}
+function exportInteractions() {
+  exportTable("interactions", [
+    ["Date", i => i.date], ["Contact / structure", i => recordById(i.recordId)?.name || i.target || ""], ["Type", i => i.type], ["Catégorie", i => i.category],
+    ["Libellé", i => i.label], ["Note", i => i.note], ["Saisi par", i => i.user],
+  ], [...interactions].sort((a, b) => (b.at || "").localeCompare(a.at || "")), "xlsx");
+}
+async function downloadBackup() {
+  notify("Préparation de la sauvegarde…");
+  try {
+    const res = await fetch(`${API_BASE}/api/backup`, { headers: authHeaders() });
+    if (!res.ok) throw new Error("refus");
+    triggerDownload(await res.blob(), `sauvegarde-crm-sinai-${todayIso()}.json`);
+    logAudit("Sauvegarde complète téléchargée.");
+    saveCrmData({ silent: true });
+  } catch {
+    notify("Sauvegarde impossible pour le moment", true);
+  }
+}
+async function logout() {
+  await apiLogout();
+  await idbDel("state");
+  await idbDel("pending");
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch { /* stockage indisponible */ }
+  history.replaceState(null, "", location.pathname);
+  location.reload();
 }
 
 function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
@@ -3307,7 +3260,7 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   if (d.open) d.close();
   d.className = kind === "editRecord" ? "wide-dialog" : "";
   dialogContent().innerHTML = `<form class="modal" data-form="${kind}">
-    <header><div><span class="eyebrow">${eyebrow}</span><h2>${title}</h2></div><button class="icon-btn" type="button" data-modal-close title="Fermer">✕</button></header>
+    <header><div><span class="eyebrow">${escapeHtml(eyebrow)}</span><h2>${escapeHtml(title)}</h2></div><button class="icon-btn" type="button" data-modal-close title="Fermer">${icon("x")}</button></header>
     <div class="form-grid">${body}</div>
     <footer><button type="button" data-modal-close>Annuler</button><button class="primary-btn" type="submit">${submit}</button></footer>
   </form>`;
@@ -3342,7 +3295,13 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
   const paymentStatusSelect = dialogContent().querySelector('select[name="status"]');
   const paymentDateSection = dialogContent().querySelector('[data-payment-date-section]');
   if (paymentStatusSelect && paymentDateSection) {
-    const syncPaymentDateSection = () => { paymentDateSection.style.display = paymentStatusSelect.value === "Reçu" ? "" : "none"; };
+    // À la création, un don déjà reçu n'a qu'une date (celle du paiement) ;
+    // une promesse n'a que la date de la promesse.
+    const promiseDateSection = dialogContent().querySelector('[data-promise-date-section]:not([data-keep])');
+    const syncPaymentDateSection = () => {
+      paymentDateSection.style.display = paymentStatusSelect.value === "Reçu" ? "" : "none";
+      if (promiseDateSection) promiseDateSection.style.display = paymentStatusSelect.value === "Reçu" ? "none" : "";
+    };
     syncPaymentDateSection();
     paymentStatusSelect.addEventListener("change", syncPaymentDateSection);
   }
@@ -3350,61 +3309,70 @@ function modalShell(kind, eyebrow, title, body, submit = "Enregistrer") {
 }
 
 function contactLockedField(r) {
-  return `<label class="span-2">Contact / structure<input type="text" value="${escapeHtml(r.name)}" readonly class="field-locked"><input type="hidden" name="recordId" value="${r.id}"></label>`;
+  return `<label class="span-2">Contact / structure<input type="text" value="${escapeHtml(r.name)}" readonly class="field-locked"><input type="hidden" name="recordId" value="${escapeHtml(r.id)}"></label>`;
 }
-function openQuickForRecord(recordId, kind) {
+const PAYMENT_METHODS = ["CB", "Chèque", "Virement", "SEPA", "Espèces"];
+// Champ Occasion avec suggestions : les campagnes en cours d'abord, puis les
+// occasions déjà utilisées — pour rattacher un don à une campagne sans faute
+// de frappe.
+function occasionField(value) {
+  const names = [...new Set([...campaigns.filter(c => !c.archived).map(c => c.name), ...distinctOccasions()])];
+  return `<label>Occasion / campagne<input name="occasion" type="text" value="${escapeHtml(value || "")}" list="occasionList" placeholder="Gala, Pessah, Bar Mitzvah…" autocomplete="off"><datalist id="occasionList">${names.map(n => `<option value="${escapeHtml(n)}">`).join("")}</datalist></label>`;
+}
+// Corps du formulaire d'un don / paiement (création : p = null).
+function paymentFormBody(p, preset = {}) {
+  return `
+    ${selectField("Type", "type", ensureOption(PAYMENT_TYPE_OPTIONS, p?.type), p ? p.type : (preset.type || "Don"))}
+    ${field("Montant total (€)", "amount", p ? p.amount : "", "number", "min='0.01' step='0.01' required inputmode='decimal'")}
+    ${selectField("Statut", "status", ensureOption(["Reçu", "Promis"], p?.status), p ? p.status : (preset.status || "Reçu"))}
+    ${selectField("Moyen", "method", ensureOption(PAYMENT_METHODS, p?.method), p ? p.method : (preset.status === "Promis" ? "Chèque" : "CB"))}
+    <div data-promise-date-section${p ? " data-keep" : ""}>${field("Date de la promesse", "promiseDate", p ? (p.promiseDate || "") : todayIso(), "date")}</div>
+    <div data-payment-date-section>${field("Date du paiement", "paymentDate", p ? (p.paymentDate || todayIso()) : todayIso(), "date")}</div>
+    ${selectField("Paiement en plusieurs versements", "installmentPlan", ["Non", "Oui"], p?.installmentPlan ? "Oui" : "Non")}
+    ${occasionField(p ? (p.occasion || []).join(", ") : (preset.occasion || ""))}
+    ${installmentFormSection(p || null)}
+    ${p ? selectField("Reçu fiscal", "receipt", ensureOption(["Non éligible", "À générer", "Généré", "Généré ailleurs"], p.receipt), p.receipt) : ""}
+    ${textareaField("Note (facultatif)", "note", p?.note || "")}`;
+}
+// Corps du formulaire d'une tâche (création : t = null). lockedRecord : la
+// tâche est créée depuis une fiche, le contact est donc déjà choisi.
+function taskFormBody(t, lockedRecord) {
+  const linked = t?.recordId ? recordById(t.recordId) : null;
+  const people = [...new Set([myFirstName(), ...accounts.map(a => a.first), ...tasks.map(x => x.assignedTo)].filter(Boolean))];
+  return `${t ? `<input type="hidden" name="taskId" value="${escapeHtml(t.id)}">` : ""}
+    <label class="span-2">Titre de la tâche<input name="title" type="text" value="${escapeHtml(t?.title || "")}" required maxlength="140" placeholder="Ex : Relancer pour le renouvellement"></label>
+    ${lockedRecord ? contactLockedField(lockedRecord) : pickerField("Contact lié (facultatif)", "recordId", linked, false, true)}
+    ${field("Échéance", "dueDate", t ? (t.dueDate || "") : todayIso(), "date")}
+    ${field("Heure (facultatif)", "dueTime", t?.dueTime || "", "time")}
+    <label>Assignée à<input name="assignedTo" type="text" value="${escapeHtml(t ? (t.assignedTo || "") : myFirstName())}" list="assigneeList" autocomplete="off"><datalist id="assigneeList">${people.map(n => `<option value="${escapeHtml(n)}">`).join("")}</datalist></label>
+    ${selectField("Priorité", "priority", ["Normale", "Haute"], t?.priority === "haute" ? "Haute" : "Normale")}
+    ${textareaField("Détail (facultatif)", "note", t?.note || "")}`;
+}
+function openQuickForRecord(recordId, kind, preset = {}) {
   const r = recordById(recordId);
   if (!r) return notify("Fiche introuvable");
-  if (kind === "payment") return modalShell("payment", "Don pour " + r.name, "Ajouter un don / paiement",
-    `${contactLockedField(r)}
-     ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], "Don")}
-     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
-     ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
-     ${installmentFormSection(null)}
-     ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-     ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
-     ${field("Date de la promesse", "promiseDate", todayIso(), "date")}
-     <div data-payment-date-section>${field("Date du paiement", "paymentDate", todayIso(), "date")}</div>
-     ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`);
-  if (kind === "interaction") return modalShell("interaction", "Interaction avec " + r.name, "Ajouter une interaction",
+  if (kind === "payment") return modalShell("payment", r.name, preset.status === "Promis" ? "Nouvelle promesse de don" : "Nouveau don / paiement",
+    `${contactLockedField(r)}${paymentFormBody(null, preset)}`);
+  if (kind === "interaction") return modalShell("interaction", r.name, "Nouvelle interaction",
     `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
+     ${selectField("Type", "type", ["Appel", "Email", "Message", "Rendez-vous", "Note"], preset.type || "Appel")}
      ${categoryField(interactionCategories[0] || "Suivi")}
-     ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Appel")}
      ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
-     ${textareaField("Détail (optionnel)", "note", "")}`);
-  if (kind === "task") return modalShell("task", "Tâche pour " + r.name, "Ajouter une tâche",
-    `${contactLockedField(r)}
-     ${field("Titre de la tâche", "title", "", "text", "required placeholder='Ex : Relancer pour le renouvellement'")}
-     ${field("Échéance", "dueDate", todayIso(), "date")}
-     ${field("Heure (si nécessaire)", "dueTime", "", "time")}`, "Ajouter la tâche");
-  return modalShell("comment", "Commentaire sur " + r.name, "Ajouter un commentaire",
+     ${textareaField("Détail (facultatif)", "note", "")}`);
+  if (kind === "task") return modalShell("task", r.name, "Nouvelle tâche", taskFormBody(null, r), "Ajouter la tâche");
+  return modalShell("comment", r.name, "Nouvelle note",
     `${contactLockedField(r)}
      ${field("Date", "date", todayIso(), "date", "required")}
-     ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile sur ce contact...'")}`, "Ajouter le commentaire");
+     ${textareaField("Note", "note", "", "required placeholder='Une information utile à retenir sur ce contact…'")}`, "Ajouter la note");
 }
 
-// Modifier un paiement existant : jusqu'ici seul l'ajout d'un nouveau
-// paiement était possible, donc corriger une erreur ou faire passer un don
-// promis de "Promis" à "Reçu" une fois l'argent effectivement arrivé
-// n'avait aucune solution.
 function openEditPayment(id) {
   const p = payments.find(item => item.id === id);
   if (!p) return notify("Paiement introuvable");
   const r = recordById(p.recordId);
-  modalShell("editPayment", "Paiement", `Modifier le paiement de ${p.payer}`,
-    `${r ? contactLockedField(r) : ""}
-     <input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
-     ${selectField("Type", "type", ensureOption(["Don","Adhésion","Billetterie"], p.type), p.type)}
-     ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], p.installmentPlan ? "Oui" : "Non")}
-     ${field("Montant total (€)", "amount", p.amount, "number", "min='0' step='1' required")}
-     ${installmentFormSection(p)}
-     ${selectField("Moyen", "method", ensureOption(["CB","Chèque","Virement","SEPA","Espèces"], p.method), p.method)}
-     ${selectField("Statut", "status", ensureOption(["Reçu","Promis"], p.status), p.status)}
-     ${field("Date de la promesse", "promiseDate", p.promiseDate || "", "date")}
-     <div data-payment-date-section>${field("Date du paiement", "paymentDate", p.paymentDate || todayIso(), "date")}</div>
-     ${selectField("Reçu", "receipt", ensureOption(["Non éligible","À générer","Généré","Généré ailleurs"], p.receipt), p.receipt)}
-     ${field("Occasion", "occasion", (p.occasion || []).join(", "))}`, "Enregistrer");
+  modalShell("editPayment", p.payer || "Paiement", "Modifier le paiement",
+    `${r ? contactLockedField(r) : ""}<input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">${paymentFormBody(p)}`, "Enregistrer");
 }
 // Un paiement "échelonné" (ex : une Promesse réglée en plusieurs fois) suit
 // ses versements séparément du montant total dû, pour calculer
@@ -3513,30 +3481,51 @@ async function downloadReceiptPdf(paymentId) {
       body: JSON.stringify(payloadBody),
     });
     if (!res.ok) throw new Error("Échec de génération du PDF");
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `recu-${p.receiptNumber}.pdf`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    triggerDownload(await res.blob(), `recu-${p.receiptNumber}.pdf`);
   } catch (err) {
-    notify("Impossible de générer le PDF du reçu");
+    notify("Impossible de générer le PDF du reçu", true);
   }
 }
-// Action "Régénérer" disponible sur chaque don/adhésion, indépendamment de
-// l'envoi par email (pas encore branché) : attribue un numéro si besoin,
-// journalise la (ré)émission dans le suivi comptable, puis télécharge tout
-// de suite le PDF pour qu'on puisse voir le résultat immédiatement.
+// Demande au serveur les prochains numéros de reçu (attribués un par un, sans
+// trou ni doublon, même si deux personnes génèrent des reçus au même moment).
+// Sans réseau, on retombe sur le calcul local.
+async function ensureReceiptNumbers(list) {
+  const need = list.filter(p => !p.receiptNumber);
+  if (!need.length) return;
+  let numbers = null;
+  try {
+    const res = await fetch(`${API_BASE}/api/receipt-number`, {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ year: new Date().getFullYear(), count: need.length }),
+    });
+    if (res.ok) numbers = (await res.json()).numbers;
+  } catch { /* hors ligne */ }
+  need.forEach((p, i) => { p.receiptNumber = (numbers && numbers[i]) || nextReceiptNumber(); });
+}
 async function regenerateReceipt(paymentId) {
   const p = payments.find(item => item.id === paymentId);
   if (!p) { notify("Paiement introuvable"); return; }
   if (p.receipt === "Généré ailleurs") { notify("Ce don a déjà un reçu émis par l'ancien système : pas de régénération pour éviter un doublon."); return; }
+  if (paymentIsPending(p)) { notify("Ce don n'est pas encore reçu : le reçu fiscal ne peut être émis qu'une fois l'argent arrivé."); return; }
+  const first = !p.receiptNumber;
+  await ensureReceiptNumbers([p]);
   logReceiptGeneration(p);
-  logAudit(`Reçu régénéré manuellement pour ${p.payer} (${p.receiptNumber}).`);
+  logAudit(`Reçu ${first ? "généré" : "régénéré"} pour ${p.payer} (${p.receiptNumber}).`);
   saveCrmData();
   render();
-  notify(`Reçu ${p.receiptNumber} régénéré`);
+  notify(`Reçu ${p.receiptNumber} ${first ? "généré" : "régénéré"}`);
   await downloadReceiptPdf(p.id);
+}
+async function generateMissingReceipts() {
+  const list = payments.filter(p => (p.receipt === "A generer" || p.receipt === "À générer") && !paymentIsPending(p));
+  if (!list.length) return notify("Aucun reçu en attente");
+  if (!await uiConfirm(`Générer ${list.length} reçu(s) fiscal(aux) ? Un numéro de reçu définitif sera attribué à chacun.`, { title: "Générer les reçus manquants", okLabel: "Générer" })) return;
+  await ensureReceiptNumbers(list);
+  list.forEach(p => logReceiptGeneration(p));
+  logAudit(`${list.length} reçu(s) généré(s).`);
+  saveCrmData();
+  render();
+  notify(`${list.length} reçu(s) généré(s)`);
 }
 // Enregistre une (re)génération de reçu : attribue le numéro s'il n'existe
 // pas encore, marque le paiement "Généré", et ajoute une ligne au suivi
@@ -3546,6 +3535,7 @@ function logReceiptGeneration(p, entity) {
   if (!p.receiptNumber) p.receiptNumber = nextReceiptNumber();
   p.receipt = "Généré";
   receiptLog.unshift({
+    id: `RCL-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     "Date de génération": todayStr(),
     "Numéro de reçu": p.receiptNumber,
     "Donateur": p.payer,
@@ -3588,7 +3578,7 @@ function installmentFormSection(p) {
     ${summary}
     ${listHtml}
     <p class="installment-form-label">Ajouter un versement maintenant (optionnel)</p>
-    ${field("Montant reçu (€)", "newInstallmentAmount", "", "number", "min='0' step='1'")}
+    ${field("Montant reçu (€)", "newInstallmentAmount", "", "number", "min='0' step='0.01' inputmode='decimal'")}
     ${selectField("Moyen de ce versement", "newInstallmentMethod", ["CB","Chèque","Virement","SEPA","Espèces"], (p && p.method) || "CB")}
   </div>`;
 }
@@ -3602,103 +3592,147 @@ function applyInlineInstallment(p, data) {
   if (!p.installmentPlan || !montant) return;
   if (!Array.isArray(p.installments)) p.installments = [];
   p.installments.push({ id: nextId("VER", p.installments), date: todayStr(), amount: montant, method: data.newInstallmentMethod || p.method });
+  p.installmentPlan = true;
   logAudit(`Versement de ${euro(montant)} (${data.newInstallmentMethod || p.method}) ajouté pour ${p.payer} — ${p.type}.`);
   if (paymentRemaining(p) <= 0) { p.status = "Reçu"; p.paymentDate = p.paymentDate || todayIso(); bumpReceiptIfReceived(p); }
-}
-function paymentTimelineItem(p) {
-  // Un don/adhésion a un reçu associé : on donne accès à "Télécharger"/
-  // "Régénérer" directement ici, sur la ligne, plutôt que de forcer à
-  // aller chercher la même ligne dans Paiements > Reçus (demande explicite :
-  // retrouver cette action à côté du don dans la fiche contact).
-  const hasReceipt = p.type === "Don" || p.type === "Adhésion";
-  const externe = p.receipt === "Généré ailleurs";
-  const receiptActions = !hasReceipt ? "" : externe
-    ? `<span class="muted-note">Reçu émis par l'ancien système</span>`
-    : `${p.receiptNumber ? action("Télécharger le reçu", `download-receipt-pdf:${p.id}`) : ""}${action("Régénérer le reçu", `regenerate-receipt:${p.id}`)}`;
-  return `<div class="timeline-item"><strong>${euro(p.amount)} — ${p.type}</strong><p>${p.method} · ${status(p.status)} · Reçu : ${status(p.receipt)}</p>${(p.occasion||[]).length ? `<div class="chip-list">${p.occasion.map(o=>tag(o,"violet")).join(" ")}</div>` : ""}<span class="timeline-date">${paymentPrimaryDate(p)}</span>${installmentBlock(p)}<div class="row-actions payment-actions">${receiptActions}${action("Modifier", `edit-payment:${p.id}`)}${action("Supprimer", `delete-payment:${p.id}`)}</div></div>`;
 }
 function openAddInstallment(id) {
   const p = payments.find(item => item.id === id);
   if (!p) return notify("Paiement introuvable");
   modalShell("addInstallment", "Versement", `Ajouter un versement — ${p.payer}`,
     `<input type="hidden" name="paymentId" value="${escapeHtml(p.id)}">
-     <p class="muted-note">Reste à payer avant ce versement : ${euro(paymentRemaining(p))}</p>
-     ${field("Montant reçu (€)", "amount", "", "number", "min='0' step='1' required")}
-     ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], p.method || "CB")}
+     <p class="span-2 form-note">Reste à payer avant ce versement : <strong>${euro(Math.max(0, paymentRemaining(p)))}</strong></p>
+     ${field("Montant reçu (€)", "amount", "", "number", "min='0.01' step='0.01' required inputmode='decimal'")}
+     ${selectField("Moyen", "method", PAYMENT_METHODS, p.method || "CB")}
      ${field("Date", "date", todayIso(), "date", "required")}`, "Ajouter le versement");
 }
-function deletePayment(id) {
+async function deletePayment(id) {
   const p = payments.find(item => item.id === id);
   if (!p) return notify("Paiement introuvable");
-  const ok = window.confirm(`Supprimer définitivement ce paiement de ${euro(p.amount)} (${p.type}) pour ${p.payer} ?\nCette action est irréversible.`);
+  const ok = await uiConfirm(`Supprimer ce paiement de ${euro(p.amount)} (${p.type}) pour ${p.payer} ?${p.receiptNumber ? `\n\nAttention : le reçu fiscal ${p.receiptNumber} a déjà été émis pour ce paiement.` : ""}`, { title: "Supprimer le paiement", danger: true, okLabel: "Supprimer" });
   if (!ok) return;
-  payments.splice(payments.indexOf(p), 1);
+  const index = payments.indexOf(p);
+  payments.splice(index, 1);
   logAudit(`Paiement supprimé : ${p.type} de ${euro(p.amount)} pour ${p.payer}.`);
   saveCrmData();
   render();
-  notify("Paiement supprimé");
+  notify("Paiement supprimé", false, { label: "Annuler", run: () => { payments.splice(Math.min(index, payments.length), 0, p); logAudit(`Suppression annulée : ${p.type} de ${euro(p.amount)} pour ${p.payer}.`); saveCrmData(); render(); } });
 }
 
+// Champ de saisie d'un champ personnalisé, selon son type.
+function customFieldInput(f, value) {
+  const name = `cf:${f.name}`;
+  if (f.type === "Liste") return selectField(escapeHtml(f.name), name, ["", ...splitTags(f.values)], value || "");
+  if (f.type === "Case à cocher") return selectField(escapeHtml(f.name), name, ["", "Oui", "Non"], value || "");
+  return field(escapeHtml(f.name), name, value || "", f.type === "Date" ? "date" : f.type === "Montant" ? "number" : "text");
+}
+function formSection(label) {
+  return `<h3 class="form-section">${escapeHtml(label)}</h3>`;
+}
 function openModal(kind, options = {}) {
-  const structOptions = records.filter(r => r.kind === "Structure");
-  const contactOptions = records.filter(r => r.kind === "Contact");
-  const selected = records.find(r => r.id === state.selectedRecord) || records[0];
+  const selected = (state.showDetail && recordById(state.selectedRecord)) || null;
   const modals = {
-    contact: () => modalShell("contact", "Contact", "Ajouter un contact",
-      `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], "")}
-       ${field("Prénom", "first", "", "text", "required placeholder='Prénom'")}
-       ${field("Nom", "last", "", "text", "required placeholder='Nom'")}
-       ${field("Email", "email", "", "email", "placeholder='email@exemple.fr'")}
-       ${field("Téléphone", "phone", "", "tel", "placeholder='06 12 34 56 78'")}
+    contact: () => modalShell("contact", "Contact", "Nouveau contact",
+      `${selectField("Civilité", "civility", ["", "Mme", "M.", "Famille"], "")}
+       ${field("Prénom", "first", "", "text", "required placeholder='Prénom' autocomplete='off'")}
+       ${field("Nom", "last", "", "text", "required placeholder='Nom' autocomplete='off'")}
+       ${field("Email", "email", "", "email", "placeholder='email@exemple.fr' autocomplete='off'")}
+       ${field("Téléphone", "phone", "", "tel", "placeholder='06 12 34 56 78' autocomplete='off'")}
        ${dobFields({})}
-       ${field("Adresse", "address", "", "text", "placeholder='Adresse'")}
+       <label class="span-2">Adresse<input name="address" type="text" placeholder="Numéro et rue" autocomplete="off"></label>
+       ${field("Code postal", "zip", "", "text", "inputmode='numeric' autocomplete='off'")}
+       ${field("Ville", "city", "", "text", "autocomplete='off'")}
        ${field("Famille", "family", "", "text", "placeholder='Nom de famille commun'")}
-       ${field("Étiquettes", "tags", "", "text", "placeholder='Parent, Donateur'")}`),
-    structure: () => modalShell("structure", "Structure", "Ajouter une structure",
-      `${field("Nom", "name", "", "text", "required placeholder='Nom de la structure'")}
+       <label>Étiquettes<input name="tags" type="text" placeholder="Parent, Donateur" list="tagList" autocomplete="off"><datalist id="tagList">${distinctTags().slice(0, 60).map(t => `<option value="${escapeHtml(t)}">`).join("")}</datalist></label>`, "Créer le contact"),
+    structure: () => modalShell("structure", "Structure", "Nouvelle structure",
+      `<label class="span-2">Nom<input name="name" type="text" required placeholder="Nom de l'entreprise, de la fondation…" autocomplete="off"></label>
        ${field("Email", "email", "", "email", "placeholder='contact@structure.fr'")}
        ${field("Téléphone", "phone", "", "tel")}
-       ${field("Adresse", "address", "")}
+       <label class="span-2">Adresse<input name="address" type="text" autocomplete="off"></label>
+       ${field("Code postal", "zip", "")}
+       ${field("Ville", "city", "")}
        ${field("SIREN", "siren", "")}
-       ${selectField("Forme juridique", "legal", ["Association","Fondation","SAS","SARL","Autre"], "Association")}
-       ${field("Étiquettes", "tags", "", "text", "placeholder='Structure, Partenaire'")}`),
-    payment: () => modalShell("payment", "Paiement", "Ajouter un paiement",
-      `${pickerField("Payeur", "recordId", selected)}
-       ${selectField("Type", "type", ["Don","Adhésion","Billetterie"], options.type || "Don")}
-       ${selectField("Paiement échelonné (plusieurs versements)", "installmentPlan", ["Non","Oui"], "Non")}
-       ${field("Montant total (€)", "amount", "", "number", "min='0' step='1' required")}
-       ${installmentFormSection(null)}
-       ${selectField("Moyen", "method", ["CB","Chèque","Virement","SEPA","Espèces"], "CB")}
-       ${selectField("Statut", "status", ["Reçu","Promis"], "Reçu")}
-       ${field("Date de la promesse", "promiseDate", todayIso(), "date")}
-       <div data-payment-date-section>${field("Date du paiement", "paymentDate", todayIso(), "date")}</div>
-       ${field("Occasion", "occasion", "", "text", "placeholder='Bar Mitzvah, Pessah, Anniversaire…'")}`),
-    account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Ajouter un compte",
+       ${selectField("Forme juridique", "legal", ["Association", "Fondation", "SAS", "SARL", "Autre"], "Association")}
+       ${field("Étiquettes", "tags", "", "text", "placeholder='Mécène, Partenaire'")}`, "Créer la structure"),
+    payment: () => modalShell("payment", "Collecte", options.status === "Promis" ? "Nouvelle promesse de don" : "Nouveau don / paiement",
+      `${pickerField("Donateur / payeur", "recordId", selected, true, true)}${paymentFormBody(null, options)}`),
+    task: () => modalShell("task", "Suivi", "Nouvelle tâche", taskFormBody(null, null), "Ajouter la tâche"),
+    account: () => modalShell("account", "Administration", options.existing ? `Modifier ${options.existing.email}` : "Nouveau compte",
       accountFormFields(options.existing), options.existing ? "Enregistrer" : "Créer le compte"),
-    field: () => modalShell("field", "Paramètres", "Ajouter un champ personnalisé",
-      `${field("Nom du champ", "name", "", "text", "required")}${selectField("Type", "type", ["Texte","Date","Montant","Liste","Case à cocher"], "Texte")}${field("Valeurs", "values", "Libre")}${selectField("Obligatoire", "required", ["Oui","Non"], "Non")}`),
-    group: () => modalShell("group", "Groupe", "Créer un groupe",
-      `${field("Nom du groupe", "name", "", "text", "required")}${selectField("Type", "type", ["Équipe","Famille","Gouvernance","Mécénat","Événement"], "Équipe")}${field("Établissement", "establishment", "Sinaï")}`),
-    interaction: () => modalShell("interaction", "Interaction", "Ajouter une interaction",
-      `${pickerField("Contact / structure", "recordId", selected)}
+    password: () => modalShell("password", "Mon compte", "Changer mon mot de passe",
+      `<label class="span-2">Mot de passe actuel<input name="current" type="password" required autocomplete="current-password"></label>
+       ${field("Nouveau mot de passe", "next", "", "password", "required minlength='8' autocomplete='new-password' placeholder='8 caractères minimum'")}
+       ${field("Confirmer", "confirm", "", "password", "required minlength='8' autocomplete='new-password'")}`, "Changer le mot de passe"),
+    field: () => modalShell("field", "Paramètres", "Nouveau champ personnalisé",
+      `${field("Nom du champ", "name", "", "text", "required placeholder='Ex : Établissement'")}
+       ${selectField("Type", "type", ["Texte", "Date", "Montant", "Liste", "Case à cocher"], "Texte")}
+       <label class="span-2">Valeurs possibles (pour une liste, séparées par des virgules)<input name="values" type="text" placeholder="Beth Hilel, Beth Mena'hem"></label>`, "Créer le champ"),
+    group: () => modalShell("group", "Groupe", "Nouveau groupe",
+      `${field("Nom du groupe", "name", "", "text", "required")}${selectField("Type", "type", ["Équipe", "Famille", "Gouvernance", "Mécénat", "Événement"], "Équipe")}`, "Créer le groupe"),
+    campaign: () => {
+      const c = options.existing || null;
+      return modalShell("campaign", "Collecte", c ? "Modifier la campagne" : "Nouvelle campagne",
+        `${c ? `<input type="hidden" name="campaignId" value="${escapeHtml(c.id)}">` : ""}
+         <label class="span-2">Nom de la campagne<input name="name" type="text" value="${escapeHtml(c?.name || "")}" required placeholder="Ex : Gala 2027" autocomplete="off"></label>
+         ${field("Objectif (€)", "goal", c?.goal || "", "number", "min='0' step='1' inputmode='numeric' placeholder='Facultatif'")}
+         <span></span>
+         ${field("Début", "startDate", c?.startDate || "", "date")}
+         ${field("Fin", "endDate", c?.endDate || "", "date")}
+         ${textareaField("Note (facultatif)", "note", c?.note || "")}
+         <p class="span-2 form-note">Un don est compté dans cette campagne quand son champ « Occasion / campagne » porte ce nom.</p>`, c ? "Enregistrer" : "Créer la campagne");
+    },
+    interaction: () => modalShell("interaction", "Suivi", "Nouvelle interaction",
+      `${pickerField("Contact / structure", "recordId", selected, true, true)}
        ${field("Date", "date", todayIso(), "date", "required")}
+       ${selectField("Type", "type", ["Appel", "Email", "Message", "Rendez-vous", "Note"], "Appel")}
        ${categoryField(interactionCategories[0] || "Suivi")}
-       ${selectField("Type", "type", ["Email","Appel","Rendez-vous","Note"], "Email")}
-       ${field("Libellé", "label", "")}
-       ${textareaField("Détail (optionnel)", "note", "")}`),
-    comment: () => modalShell("comment", "Commentaire", "Ajouter un commentaire",
+       ${field("Libellé", "label", "", "text", "placeholder='Ex : relance annuelle'")}
+       ${textareaField("Détail (facultatif)", "note", "")}`),
+    comment: () => modalShell("comment", "Suivi", "Nouvelle note",
       `${pickerField("Contact / structure", "recordId", selected)}
        ${field("Date", "date", todayIso(), "date", "required")}
-       ${textareaField("Commentaire", "note", "", "required placeholder='Notez ici une information utile...'")}`, "Ajouter le commentaire"),
-    linkage: () => modalShell("linkage", "Liaison", "Ajouter une liaison",
-      `${selectField("Entité A", "a", records.map(r => r.name), selected ? selected.name : "")}${field("Rôle A", "roleA", "Parent")}${selectField("Entité B", "b", records.map(r => r.name), (records[1]||records[0]||{}).name || "")}${field("Rôle B", "roleB", "Parent")}${field("Type de liaison", "type", "Famille")}`),
-    receiptTemplate: () => modalShell("receiptTemplate", "Reçus fiscaux", "Ajouter un modèle de reçu",
-      `${field("Nom du modèle", "name", "", "text", "required")}${field("Entité émettrice", "entity", "Réseau Sinaï")}${selectField("Mode", "mode", ["Automatique","Validation","Manuel"], "Validation")}${field("Signature", "signature", "Direction")}`),
-    editRecord: () => selected.kind === "Structure"
-      ? modalShell("editRecord", "Fiche structure", `Modifier ${selected.name}`, `${field("Nom", "name", selected.name, "text", "required")}${field("Email", "email", selected.email || "", "email")}${field("Téléphone", "phone", selected.phone || "")}${field("Adresse", "address", selected.address || "")}${field("SIREN", "siren", selected.siren || "")}${field("Forme juridique", "legal", selected.legal || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}`)
-      : modalShell("editRecord", "Fiche contact", `Modifier ${selected.name}`, `${selectField("Civilité", "civility", ["","Mme","M.","Famille"], selected.civility || "")}${field("Prénom", "first", selected.first || "")}${field("Nom", "last", selected.last || "", "text", "required")}${field("Email principal", "email", selected.email || "", "email")}${field("Email secondaire", "secondaryEmails", selected.secondaryEmails || "")}${field("Téléphone", "phone", selected.phone || "")}${field("Téléphone 2", "phone2", selected.phone2 || "")}${dobFields(selected)}${field("Adresse", "address", selected.address || "")}${field("Code postal", "zip", selected.zip || "")}${field("Ville", "city", selected.city || "")}${field("Pays", "country", selected.country || "")}${field("Famille", "family", selected.family || "")}${field("Rôle de foyer", "role", selected.role || "")}${field("Type de foyer", "householdType", selected.householdType || "")}${field("Statut parent", "parentStatus", selected.parentStatus || "")}${field("Statut enfant", "childStatus", selected.childStatus || "")}${field("Profession", "profession", selected.profession || "")}${field("École actuelle", "school", selected.school || "")}${field("Source", "source", selected.source || "")}${field("Étiquettes", "tags", (selected.tags || []).join(", "))}${field("Segments", "segments", (selected.segments || []).join(", "))}${field("Groupes", "groups", (selected.groups || []).join(", "))}${field("Portefeuille (initiales du responsable)", "agent", selected.agent || "", "text", "placeholder='Ex : ARIE, JP'")}${textareaField("Commentaire", "comment", selected.comment || "")}`),
+       ${textareaField("Note", "note", "", "required placeholder='Une information utile à retenir…'")}`, "Ajouter la note"),
+    linkage: () => {
+      const a = options.recordId ? recordById(options.recordId) : selected;
+      return modalShell("linkage", "Relations", "Nouvelle liaison",
+        `${pickerField("Première fiche", "aId", a)}
+         ${pickerField("Deuxième fiche", "bId", null)}
+         ${field("Rôle de la première", "roleA", "", "text", "placeholder='Ex : Père'")}
+         ${field("Rôle de la deuxième", "roleB", "", "text", "placeholder='Ex : Fils'")}
+         <label class="span-2">Type de liaison<input name="type" type="text" value="Famille" list="linkTypeList"><datalist id="linkTypeList">${["Famille", "Conjoint", "Parent / enfant", "Professionnel", "Dirigeant de la structure", "Ami"].map(v => `<option value="${v}">`).join("")}</datalist></label>`, "Créer la liaison");
+    },
+    editRecord: () => {
+      const r = selected;
+      if (!r) return notify("Aucune fiche ouverte");
+      const custom = customFields.length ? `${formSection("Champs personnalisés")}${customFields.map(f => customFieldInput(f, (r.custom || {})[f.name])).join("")}` : "";
+      const classement = `${formSection("Classement")}${field("Étiquettes", "tags", (r.tags || []).join(", "))}${field("Segments", "segments", (r.segments || []).join(", "))}${field("Groupes", "groups", (r.groups || []).join(", "))}${field("Portefeuille (prénom du responsable)", "agent", r.agent || "", "text", "placeholder='Ex : ARIE'")}`;
+      if (r.kind === "Structure") return modalShell("editRecord", "Fiche structure", `Modifier ${r.name}`,
+        `${formSection("Identité")}${field("Nom", "name", r.name, "text", "required")}${field("SIREN", "siren", r.siren || "")}${field("Forme juridique", "legal", r.legal || "")}${field("Source", "source", r.source || "")}
+         ${formSection("Coordonnées")}${field("Email", "email", r.email || "", "email")}${field("Téléphone", "phone", r.phone || "", "tel")}${field("Adresse", "address", r.address || "")}${field("Code postal", "zip", r.zip || "")}${field("Ville", "city", r.city || "")}${field("Pays", "country", r.country || "")}
+         ${classement}${custom}${textareaField("Commentaire", "comment", r.comment || "")}`);
+      return modalShell("editRecord", "Fiche contact", `Modifier ${r.name}`,
+        `${formSection("Identité")}${selectField("Civilité", "civility", ensureOption(["", "Mme", "M.", "Famille"], r.civility), r.civility || "")}${field("Prénom", "first", r.first || "")}${field("Nom", "last", r.last || "", "text", "required")}${field("Profession", "profession", r.profession || "")}${dobFields(r)}
+         ${formSection("Coordonnées")}${field("Email principal", "email", r.email || "", "email")}${field("Email secondaire", "secondaryEmails", r.secondaryEmails || "")}${field("Téléphone", "phone", r.phone || "", "tel")}${field("Téléphone 2", "phone2", r.phone2 || "", "tel")}${field("Adresse", "address", r.address || "")}${field("Code postal", "zip", r.zip || "")}${field("Ville", "city", r.city || "")}${field("Pays", "country", r.country || "")}
+         ${formSection("Foyer")}${field("Famille", "family", r.family || "")}${field("Rôle de foyer", "role", r.role || "")}${field("Type de foyer", "householdType", r.householdType || "")}${field("Statut parent", "parentStatus", r.parentStatus || "")}${field("Statut enfant", "childStatus", r.childStatus || "")}${field("École actuelle", "school", r.school || "")}
+         ${classement}${field("Source", "source", r.source || "")}${custom}${textareaField("Commentaire", "comment", r.comment || "")}`);
+    },
   };
   (modals[kind] || modals.contact)();
+}
+
+async function submitPasswordForm(data) {
+  if (data.next !== data.confirm) return notify("Les deux mots de passe ne sont pas identiques", true);
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/password`, {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ current: data.current, new: data.next }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return notify(body.error || "Changement impossible", true);
+    dialog().close();
+    notify("Mot de passe modifié");
+  } catch {
+    notify("Serveur injoignable : mot de passe inchangé", true);
+  }
 }
 
 /* ---------- 10. Enregistrement des formulaires -------------------------- */
@@ -3709,96 +3743,135 @@ function submitForm(event) {
   const kind = form.dataset.form;
   const data = Object.fromEntries(new FormData(form).entries());
   const required = [...form.querySelectorAll("[required]")].filter(el => !String(el.value || "").trim());
-  if (required.length) { notify("Complétez les champs obligatoires"); return; }
+  if (required.length) {
+    notify(required[0].type === "hidden" ? "Choisissez un contact dans la liste proposée" : "Complétez les champs obligatoires", true);
+    return;
+  }
 
   if (kind === "account") { submitAccountForm(form); return; }
+  if (kind === "password") { submitPasswordForm(data); return; }
   if (isReadOnlyAccount()) { dialog().close(); notify(READ_ONLY_MSG); return; }
+
+  // Message affiché une fois l'enregistrement confirmé par le serveur. Après
+  // un ajout fait ailleurs que sur la fiche concernée, on reste sur l'écran
+  // en cours et le message propose d'ouvrir la fiche.
+  const done = { message: "Enregistré", action: null };
+  const onRecordPage = id => state.view === "crm" && state.showDetail && state.selectedRecord === id;
+  const afterRecordChange = (rec, tab, message) => {
+    done.message = message;
+    if (onRecordPage(rec.id)) state.scrollToTab = tab;
+    else done.action = { label: "Voir la fiche", run: () => openRecord(rec.id, tab) };
+  };
+  const showRecord = record => {
+    state.view = "crm"; state.section = record.kind === "Structure" ? "Structures" : "Contacts";
+    state.selectedRecord = record.id; state.showDetail = true; state.mobileDetailOpen = true; state.tab = "Details";
+    state.detailReturn = null;
+  };
+  const possibleDuplicate = record => {
+    const email = String(record.email || "").toLowerCase().trim();
+    const phone = normalizePhoneKey(record.phone);
+    return records.find(r => r !== record && ((email && String(r.email || "").toLowerCase().trim() === email) || (phone && [r.phone, r.phone2].some(x => normalizePhoneKey(x) === phone))));
+  };
 
   const handlers = {
     contact: () => {
-      const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first, last: data.last, name: `${data.first} ${data.last}`.trim(), email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, source: "Manuel", family: data.family, dob: data.dob || "", dobAfterSunset: data.dobAfterSunset === "Oui", dateAdded: todayStr() };
+      const record = { id: nextId("C", records), kind: "Contact", civility: data.civility, first: data.first.trim(), last: data.last.trim(), name: `${data.first} ${data.last}`.replace(/\s+/g, " ").trim(), email: data.email.trim(), phone: data.phone.trim(), tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, zip: data.zip, city: data.city, source: "Manuel", family: data.family, dob: data.dob || "", dobAfterSunset: data.dobAfterSunset === "Oui", dateAdded: todayStr() };
       ensureInAccountScope(record);
-      records.unshift(record); state.selectedRecord = record.id; logAudit(`Contact ajouté : ${record.name}.`); navigate("crm", "Contacts");
+      records.unshift(record);
+      logAudit(`Contact ajouté : ${record.name}.`);
+      showRecord(record);
+      const dup = possibleDuplicate(record);
+      done.message = dup ? `Contact créé — doublon possible avec ${dup.name}` : "Contact créé";
     },
     structure: () => {
-      const record = { id: nextId("S", records), kind: "Structure", name: data.name, email: data.email, phone: data.phone, tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, siren: data.siren, legal: data.legal, source: "Manuel", dateAdded: todayStr() };
-      records.unshift(record); state.selectedRecord = record.id; logAudit(`Structure ajoutée : ${record.name}.`); navigate("crm", "Structures");
+      const record = { id: nextId("S", records), kind: "Structure", name: data.name.trim(), email: data.email.trim(), phone: data.phone.trim(), tags: splitTags(data.tags), groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, address: data.address, zip: data.zip, city: data.city, siren: data.siren, legal: data.legal, source: "Manuel", dateAdded: todayStr() };
+      records.unshift(record);
+      logAudit(`Structure ajoutée : ${record.name}.`);
+      showRecord(record);
+      done.message = "Structure créée";
     },
     payment: () => {
-      const payer = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.payer);
-      if (!payer) { notify("Payeur introuvable"); return; }
-      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount: Number(data.amount), type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: (data.type === "Don" && data.status === "Reçu") ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [], promiseDate: data.promiseDate || "", paymentDate: data.status === "Reçu" ? (data.paymentDate || todayIso()) : "" };
+      const payer = recordById(data.recordId);
+      if (!payer) { notify("Donateur introuvable : choisissez-le dans la liste proposée", true); return false; }
+      const amount = Number(data.amount);
+      if (!(amount > 0)) { notify("Le montant doit être supérieur à zéro", true); return false; }
+      const received = data.status === "Reçu";
+      const p = { id: nextId("PAY-SIN", payments), recordId: payer.id, date: todayStr(), at: nowIso(), payer: payer.name, email: payer.email, amount, type: data.type, status: data.status, method: data.method, occasion: splitTags(data.occasion), receipt: (data.type === "Don" && received) ? "À générer" : "Non éligible", installmentPlan: data.installmentPlan === "Oui", installments: [], promiseDate: received ? (data.paymentDate || todayIso()) : (data.promiseDate || todayIso()), paymentDate: received ? (data.paymentDate || todayIso()) : "", note: (data.note || "").trim(), user: currentUserLabel() };
       payments.unshift(p);
-      logAudit(`${data.type} de ${euro(p.amount)} ajouté pour ${payer.name}.`);
+      logAudit(`${received ? data.type : "Promesse"} de ${euro(p.amount)} ${received ? "ajouté" : "ajoutée"} pour ${payer.name}.`);
       applyInlineInstallment(p, data);
-      state.selectedRecord = payer.id; state.tab = "Paiements";
-      navigate("crm", payer.kind === "Structure" ? "Structures" : "Contacts");
+      afterRecordChange(payer, "Paiements", received ? `${data.type} de ${euro(p.amount)} enregistré` : `Promesse de ${euro(p.amount)} enregistrée`);
     },
     interaction: () => {
-      const rec = data.recordId ? recordById(data.recordId) : records.find(r => r.name === data.recordName);
-      if (!rec) { notify("Contact introuvable"); return; }
+      const rec = recordById(data.recordId);
+      if (!rec) { notify("Contact introuvable : choisissez-le dans la liste proposée", true); return false; }
       const { display, at } = dateFromInput(data.date);
       interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: data.category || "Suivi", label: data.label, type: data.type, note: data.note, user: currentUserLabel() });
       logAudit(`Interaction ajoutée pour ${rec.name}.`);
-      state.selectedRecord = rec.id; state.tab = "Activité";
-      navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
+      afterRecordChange(rec, "Activité", "Interaction enregistrée");
     },
     comment: () => {
       const rec = recordById(data.recordId);
-      if (!rec) { notify("Contact introuvable"); return; }
+      if (!rec) { notify("Contact introuvable : choisissez-le dans la liste proposée", true); return false; }
       const { display, at } = dateFromInput(data.date);
-      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi", label: "Commentaire", type: "Commentaire", note: data.note, user: currentUserLabel() });
-      logAudit(`Commentaire ajouté pour ${rec.name}.`);
-      state.selectedRecord = rec.id; state.tab = "Activité";
-      navigate("crm", rec.kind === "Structure" ? "Structures" : "Contacts");
+      interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi", label: "Note", type: "Commentaire", note: data.note, user: currentUserLabel() });
+      logAudit(`Note ajoutée pour ${rec.name}.`);
+      afterRecordChange(rec, "Activité", "Note enregistrée");
     },
     task: () => {
       const t = buildTask(data.title, data.dueDate, data.recordId, data.dueTime);
-      if (!t) return;
+      if (!t) return false;
+      t.assignedTo = (data.assignedTo || "").trim() || t.assignedTo;
+      t.priority = data.priority === "Haute" ? "haute" : "";
+      t.note = (data.note || "").trim();
       tasks.unshift(t);
       const rec = t.recordId ? recordById(t.recordId) : null;
       logAudit(`Tâche ajoutée : ${t.title}${rec ? ` (liée à ${rec.name})` : ""}.`);
-      if (rec) state.tab = "Tâches";
+      done.message = "Tâche ajoutée";
+      if (rec && onRecordPage(rec.id)) state.scrollToTab = "Tâches";
     },
     editTask: () => {
       const t = tasks.find(x => x.id === data.taskId);
-      if (!t) { notify("Tâche introuvable"); return; }
-      const cleanTitle = (data.title || "").trim();
-      if (!cleanTitle) { notify("Le titre ne peut pas être vide"); return; }
-      t.title = cleanTitle;
+      if (!t) { notify("Tâche introuvable", true); return false; }
+      t.title = data.title.trim();
       t.dueDate = data.dueDate || "";
       t.dueTime = data.dueTime || "";
       t.recordId = data.recordId || null;
       t.assignedTo = (data.assignedTo || "").trim();
+      t.priority = data.priority === "Haute" ? "haute" : "";
+      t.note = (data.note || "").trim();
       logAudit(`Tâche modifiée : ${t.title}.`);
-      state.tab = "Tâches";
     },
     holidayTask: () => {
       const h = JEWISH_HOLIDAYS.find(x => x.key === data.holidayKey);
-      if (!h) { notify("Fête introuvable"); return; }
-      holidayNotes[h.key] = { note: (data.note || "").trim(), updatedAt: nowIso() };
+      if (!h) { notify("Fête introuvable", true); return false; }
+      holidayNotes[h.key] = { ...(holidayNotes[h.key] || {}), note: (data.note || "").trim(), updatedAt: nowIso() };
       ensureHolidayReminders(); // au cas où le rappel n'existerait pas encore
       logAudit(`Idée notée pour ${h.name}.`);
     },
     portfolioTouch: () => {
       const rec = recordById(data.recordId);
-      if (!rec) { notify("Contact introuvable"); return; }
+      if (!rec) { notify("Contact introuvable", true); return false; }
       const { display, at } = dateFromInput(data.date);
       interactions.unshift({ id: nextId("I", interactions), recordId: rec.id, date: display, at, target: rec.name, category: "Suivi portefeuille", label: data.type, type: data.type, note: data.note, user: currentUserLabel() });
       logAudit(`Contact de portefeuille enregistré avec ${rec.name}.`);
+      done.message = "Contact enregistré";
     },
     addToPortfolio: () => {
       const rec = recordById(data.recordId);
-      if (!rec) { notify("Contact introuvable"); return; }
+      if (!rec) { notify("Contact introuvable : choisissez-le dans la liste proposée", true); return false; }
       const mine = myAgentCode();
-      if (!mine) { notify("Impossible de déterminer votre portefeuille."); return; }
+      if (!mine) { notify("Impossible de déterminer votre portefeuille.", true); return false; }
       rec.agent = mine;
       logAudit(`${rec.name} ajouté au portefeuille de ${currentUserLabel()}.`);
+      done.message = `${rec.name} ajouté à votre portefeuille`;
     },
     editPayment: () => {
       const p = payments.find(item => item.id === data.paymentId);
-      if (!p) { notify("Paiement introuvable"); return; }
-      p.amount = Number(data.amount);
+      if (!p) { notify("Paiement introuvable", true); return false; }
+      const amount = Number(data.amount);
+      if (!(amount > 0)) { notify("Le montant doit être supérieur à zéro", true); return false; }
+      p.amount = amount;
       p.type = data.type;
       p.method = data.method;
       p.status = data.status;
@@ -3808,75 +3881,115 @@ function submitForm(event) {
       // promesse : on la vide si on repasse en "Promis", et on la fixe
       // (ou on la garde) dès que c'est "Reçu".
       p.paymentDate = data.status === "Reçu" ? (data.paymentDate || p.paymentDate || todayIso()) : "";
-      // Un don et une promesse sont la même chose, juste à un stade
-      // différent : si on vient de repasser le Statut sur "Reçu" sans avoir
-      // pensé à changer le Reçu à la main, on l'ouvre automatiquement.
       bumpReceiptIfReceived(p);
-      if ("installmentPlan" in data) p.installmentPlan = data.installmentPlan === "Oui";
+      p.installmentPlan = data.installmentPlan === "Oui";
       if (p.installmentPlan && !Array.isArray(p.installments)) p.installments = [];
       p.occasion = splitTags(data.occasion);
+      p.note = (data.note || "").trim();
       logAudit(`Paiement modifié : ${p.type} de ${euro(p.amount)} pour ${p.payer} (${p.status}).`);
       applyInlineInstallment(p, data);
-      state.tab = "Paiements";
     },
     addInstallment: () => {
       const p = payments.find(item => item.id === data.paymentId);
-      if (!p) { notify("Paiement introuvable"); return; }
-      if (!Array.isArray(p.installments)) p.installments = [];
-      const { display } = dateFromInput(data.date);
+      if (!p) { notify("Paiement introuvable", true); return false; }
       const montant = Number(data.amount);
+      if (!(montant > 0)) { notify("Le montant doit être supérieur à zéro", true); return false; }
+      if (!Array.isArray(p.installments)) p.installments = [];
+      p.installmentPlan = true;
+      const { display } = dateFromInput(data.date);
       p.installments.push({ id: nextId("VER", p.installments), date: display, amount: montant, method: data.method });
       logAudit(`Versement de ${euro(montant)} (${data.method}) ajouté pour ${p.payer} — ${p.type}.`);
-      // Une fois le montant total couvert par les versements, on considère
-      // le don reçu : ça évite d'avoir à repasser manuellement le statut sur
-      // "Reçu" en plus d'avoir ajouté le dernier versement — et ça ouvre le
-      // reçu fiscal du même coup.
+      // Une fois le montant total couvert par les versements, le don est
+      // considéré reçu et le reçu fiscal s'ouvre du même coup.
       if (paymentRemaining(p) <= 0) { p.status = "Reçu"; p.paymentDate = p.paymentDate || data.date || todayIso(); bumpReceiptIfReceived(p); }
-      state.tab = "Paiements";
+      done.message = paymentRemaining(p) <= 0 ? "Versement ajouté — don entièrement reçu" : `Versement ajouté — reste ${euro(paymentRemaining(p))}`;
     },
-    field: () => { customFields.unshift({ name: data.name, type: data.type, values: data.values, required: data.required, profile: "Tous" }); navigate("settings", "Champs personnalisés"); },
-    group: () => { groups.unshift({ name: data.name, contacts: 0, structures: 0, date: todayStr(), type: data.type, establishment: data.establishment }); navigate("crm", "Groupes"); },
-    linkage: () => { linkages.unshift({ a: data.a, roleA: data.roleA, b: data.b, roleB: data.roleB, type: data.type }); logAudit(`Liaison ajoutée entre ${data.a} et ${data.b}.`); navigate("crm", "Liaisons"); },
-    receiptTemplate: () => { receiptTemplates.unshift({ name: data.name, entity: data.entity, mode: data.mode, signature: data.signature, active: "Oui" }); navigate("pay", "Reçus"); },
-    editRecord: () => {
-      const r = records.find(item => item.id === state.selectedRecord);
-      if (r) {
-        ["civility","first","last","name","email","secondaryEmails","phone","phone2","dob","address","zip","city","country","family","role","householdType","parentStatus","childStatus","profession","school","source","comment","siren","legal","agent"].forEach(key => { if (key in data) r[key] = data[key]; });
-        if ("dobAfterSunset" in data) r.dobAfterSunset = data.dobAfterSunset === "Oui";
-        ["tags","segments","groups"].forEach(key => { if (key in data) r[key] = splitTags(data[key]); });
-        // Le nom affiché (titres, listes, recherche, portefeuille...) doit
-        // toujours refléter Prénom + Nom pour un contact — avant, il ne se
-        // recalculait que si le champ "name" était vide au départ, donc
-        // modifier le prénom/nom d'une fiche existante ne mettait jamais à
-        // jour son nom affiché ailleurs dans l'app.
-        if (r.kind !== "Structure" && (r.first || r.last)) r.name = `${r.first || ""} ${r.last || ""}`.trim();
-        ensureInAccountScope(r);
-        r.dateModified = todayStr();
-        state.tab = "Details";
-        logAudit(`Fiche modifiée : ${r.name}.`);
+    field: () => {
+      const name = data.name.trim();
+      if (customFields.some(f => f.name.toLowerCase() === name.toLowerCase())) { notify("Un champ porte déjà ce nom", true); return false; }
+      customFields.push({ name, type: data.type, values: data.values || "", required: "Non", profile: "Tous" });
+      logAudit(`Champ personnalisé ajouté : ${name}.`);
+    },
+    group: () => { groups.unshift({ id: nextId("GRP", groups), name: data.name.trim(), date: todayStr(), type: data.type }); logAudit(`Groupe créé : ${data.name}.`); },
+    campaign: () => {
+      const name = data.name.trim();
+      const existing = data.campaignId ? campaigns.find(c => c.id === data.campaignId) : null;
+      if (campaigns.some(c => c !== existing && c.name.toLowerCase() === name.toLowerCase())) { notify("Une campagne porte déjà ce nom", true); return false; }
+      if (existing) {
+        // Renommer une campagne renomme aussi l'occasion des dons déjà rattachés.
+        if (existing.name !== name) payments.forEach(p => { if ((p.occasion || []).includes(existing.name)) p.occasion = p.occasion.map(o => o === existing.name ? name : o); });
+        Object.assign(existing, { name, goal: Number(data.goal || 0), startDate: data.startDate || "", endDate: data.endDate || "", note: (data.note || "").trim() });
+        logAudit(`Campagne modifiée : ${name}.`);
+      } else {
+        campaigns.unshift({ id: nextId("CAMP", campaigns), name, goal: Number(data.goal || 0), startDate: data.startDate || "", endDate: data.endDate || "", note: (data.note || "").trim(), archived: false, createdAt: nowIso() });
+        logAudit(`Campagne créée : ${name}.`);
+        done.message = "Campagne créée";
       }
     },
+    linkage: () => {
+      const a = recordById(data.aId), b = recordById(data.bId);
+      if (!a || !b) { notify("Choisissez les deux fiches dans la liste proposée", true); return false; }
+      if (a === b) { notify("Une fiche ne peut pas être liée à elle-même", true); return false; }
+      linkages.unshift({ id: nextId("LNK", linkages), aId: a.id, bId: b.id, a: a.name, b: b.name, roleA: data.roleA, roleB: data.roleB, type: data.type || "Famille" });
+      logAudit(`Liaison ajoutée entre ${a.name} et ${b.name}.`);
+      if (onRecordPage(a.id) || onRecordPage(b.id)) state.scrollToTab = "Relations";
+      done.message = "Liaison créée";
+    },
+    editRecord: () => {
+      const r = records.find(item => item.id === state.selectedRecord);
+      if (!r) return false;
+      const oldName = r.name;
+      ["civility", "first", "last", "name", "email", "secondaryEmails", "phone", "phone2", "dob", "address", "zip", "city", "country", "family", "role", "householdType", "parentStatus", "childStatus", "profession", "school", "source", "comment", "siren", "legal", "agent"].forEach(key => { if (key in data) r[key] = typeof data[key] === "string" ? data[key].trim() : data[key]; });
+      if ("dobAfterSunset" in data) r.dobAfterSunset = data.dobAfterSunset === "Oui";
+      ["tags", "segments", "groups"].forEach(key => { if (key in data) r[key] = splitTags(data[key]); });
+      const custom = { ...(r.custom || {}) };
+      customFields.forEach(f => { const k = `cf:${f.name}`; if (k in data) { if (data[k]) custom[f.name] = data[k]; else delete custom[f.name]; } });
+      if (Object.keys(custom).length || r.custom) r.custom = custom;
+      // Le nom affiché doit toujours refléter Prénom + Nom pour un contact.
+      if (r.kind !== "Structure" && (r.first || r.last)) r.name = `${r.first || ""} ${r.last || ""}`.trim();
+      // Le nom est recopié sur les dons, interactions et liaisons : on les
+      // met à jour pour que listes, exports et reçus portent le nouveau nom.
+      if (r.name !== oldName) {
+        payments.forEach(p => { if (p.recordId === r.id) p.payer = r.name; });
+        interactions.forEach(i => { if (i.recordId === r.id) i.target = r.name; });
+        linkages.forEach(l => { if (l.aId === r.id || (!l.aId && l.a === oldName)) l.a = r.name; if (l.bId === r.id || (!l.bId && l.b === oldName)) l.b = r.name; });
+      }
+      ensureInAccountScope(r);
+      r.dateModified = todayStr();
+      logAudit(`Fiche modifiée : ${r.name}.`);
+    },
   };
+  if ((handlers[kind] || (() => {}))() === false) return;
   dialog().close();
-  (handlers[kind] || (() => {}))();
   render();
   // "Enregistré" seulement une fois le serveur d'accord : en cas d'échec,
   // saveCrmData affiche lui-même pourquoi.
-  saveCrmData().then(outcome => { if (outcome === "ok") notify("Enregistré"); });
+  saveCrmData().then(outcome => { if (outcome === "ok") notify(done.message, false, done.action); });
 }
 
-function deleteSelectedRecord() {
-  const index = records.findIndex(record => record.id === state.selectedRecord);
-  if (index < 0) return notify("Aucune fiche sélectionnée");
-  const record = records[index];
-  const ok = window.confirm(`Supprimer définitivement ${record.name || record.id} du CRM Sinaï ?\nCette action est irréversible.`);
+// Supprime la fiche ouverte avec tout ce qui lui est rattaché (avant, ses
+// dons et interactions restaient en base sans fiche : ils continuaient à
+// compter dans les totaux tout en étant impossibles à ouvrir).
+async function deleteSelectedRecord() {
+  const record = records.find(r => r.id === state.selectedRecord);
+  if (!record) return notify("Aucune fiche sélectionnée");
+  const parts = [];
+  const nbPayments = recordLivePayments(record.id).length;
+  const nbInteractions = recordLiveInteractions(record.id).length;
+  const nbTasks = tasks.filter(t => t.recordId === record.id).length;
+  if (nbPayments) parts.push(`${nbPayments} paiement(s)`);
+  if (nbInteractions) parts.push(`${nbInteractions} interaction(s)`);
+  if (nbTasks) parts.push(`${nbTasks} tâche(s)`);
+  const ok = await uiConfirm(`Supprimer ${record.name || record.id} du CRM ?${parts.length ? `\n\n${parts.join(", ")} lié(s) à cette fiche seront supprimés avec elle.` : ""}`, { title: "Supprimer la fiche", danger: true, okLabel: "Supprimer" });
   if (!ok) return;
-  records.splice(index, 1);
-  state.selectedRecord = records[0]?.id || null;
+  const undo = removeRecords(new Set([record.id]));
+  state.showDetail = false;
+  state.mobileDetailOpen = false;
+  state.selectedRecord = null;
   logAudit(`Fiche supprimée : ${record.name || record.id}.`);
   saveCrmData();
   render();
-  notify("Fiche supprimée");
+  notify("Fiche supprimée", false, { label: "Annuler", run: undo });
 }
 
 /* ---------- 9bis. Résolution des doublons -------------------------------- */
@@ -3887,7 +4000,7 @@ function deleteSelectedRecord() {
 // sont additionnés, les champs vides de la fiche gardée sont complétés avec
 // ceux des fiches fusionnées (sans jamais écraser une info déjà renseignée),
 // puis les autres fiches sont supprimées définitivement.
-function mergeDuplicateGroup(groupKey, keepId) {
+async function mergeDuplicateGroup(groupKey, keepId) {
   const group = duplicateGroupsCache.find(g => g.key === groupKey);
   if (!group) { notify("Ce groupe de doublons n'est plus à jour, réessaie."); return; }
   const keep = recordById(keepId);
@@ -3896,13 +4009,20 @@ function mergeDuplicateGroup(groupKey, keepId) {
   if (!others.length) return;
   const names = others.map(r => r.name || r.id).join(", ");
   const plural = others.length > 1;
-  const ok = window.confirm(`Fusionner ${names} dans "${keep.name}" ?\n\nTous les dons, tâches et interactions de ${plural ? "ces fiches" : "cette fiche"} seront transférés vers "${keep.name}", puis ${plural ? "elles seront supprimées" : "elle sera supprimée"} définitivement.\n\nCette action est irréversible.`);
+  const ok = await uiConfirm(`Fusionner ${names} dans « ${keep.name} » ?\n\nTous les dons, tâches et interactions de ${plural ? "ces fiches" : "cette fiche"} seront transférés vers « ${keep.name} », puis ${plural ? "elles seront supprimées" : "elle sera supprimée"}. Cette action ne peut pas être annulée.`, { title: "Fusionner les fiches", okLabel: "Fusionner" });
   if (!ok) return;
   others.forEach(other => {
     payments.forEach(p => { if (p.recordId === other.id) p.recordId = keep.id; });
     interactions.forEach(i => { if (i.recordId === other.id) i.recordId = keep.id; });
     tasks.forEach(t => { if (t.recordId === other.id) t.recordId = keep.id; });
-    linkages.forEach(l => { if (l.a === other.name) l.a = keep.name; if (l.b === other.name) l.b = keep.name; });
+    linkages.forEach(l => {
+      if (l.aId === other.id || (!l.aId && l.a === other.name)) { l.aId = keep.id; l.a = keep.name; }
+      if (l.bId === other.id || (!l.bId && l.b === other.name)) { l.bId = keep.id; l.b = keep.name; }
+    });
+    keep.tags = [...new Set([...(keep.tags || []), ...(other.tags || [])])];
+    keep.segments = [...new Set([...(keep.segments || []), ...(other.segments || [])])];
+    keep.groups = [...new Set([...(keep.groups || []), ...(other.groups || [])])];
+    if (!keep.agent && other.agent) keep.agent = other.agent;
     keep.importedAmount = Number(keep.importedAmount || 0) + Number(other.importedAmount || 0);
     keep.importedAmount2025 = Number(keep.importedAmount2025 || 0) + Number(other.importedAmount2025 || 0);
     keep.importedAmount2026 = Number(keep.importedAmount2026 || 0) + Number(other.importedAmount2026 || 0);
@@ -3927,32 +4047,28 @@ function mergeDuplicateGroup(groupKey, keepId) {
 // (deleteSelectedRecord, qui laisse l'historique orphelin), ici on prévient
 // explicitement si des dons/interactions/tâches sont liés, et on les efface
 // avec la fiche pour ne rien laisser d'incohérent derrière.
-function deleteDuplicateRecord(groupKey, id) {
+async function deleteDuplicateRecord(groupKey, id) {
   const record = recordById(id);
   if (!record) return notify("Fiche introuvable");
   const linkedPayments = recordLivePayments(id).length;
   const linkedInteractions = recordLiveInteractions(id).length;
   const linkedTasks = tasks.filter(t => t.recordId === id).length;
-  let message = `Supprimer définitivement "${record.name}" du CRM Sinaï ?\nCette action est irréversible.`;
+  let message = `Supprimer « ${record.name} » du CRM ?`;
   if (linkedPayments || linkedInteractions || linkedTasks) {
     const parts = [];
     if (linkedPayments) parts.push(`${linkedPayments} paiement(s)`);
     if (linkedInteractions) parts.push(`${linkedInteractions} interaction(s)`);
     if (linkedTasks) parts.push(`${linkedTasks} tâche(s)`);
-    message = `"${record.name}" a ${parts.join(", ")} lié(s).\n\nLes supprimer aussi et effacer définitivement cette fiche ?\nCette action est irréversible.`;
+    message = `« ${record.name} » a ${parts.join(", ")} lié(s), qui seront supprimés avec la fiche.\n\nPour les conserver, utilisez plutôt « Garder celle-ci et fusionner » sur l'autre fiche.`;
   }
-  if (!window.confirm(message)) return;
-  payments = payments.filter(p => p.recordId !== id);
-  interactions = interactions.filter(i => i.recordId !== id);
-  tasks = tasks.filter(t => t.recordId !== id);
-  const idx = records.indexOf(record);
-  if (idx >= 0) records.splice(idx, 1);
-  if (state.selectedRecord === id) state.selectedRecord = records[0]?.id || null;
+  if (!await uiConfirm(message, { title: "Supprimer la fiche", danger: true, okLabel: "Supprimer" })) return;
+  const undo = removeRecords(new Set([id]));
+  if (state.selectedRecord === id) { state.selectedRecord = null; state.showDetail = false; state.mobileDetailOpen = false; }
   if (state.dedupeFocusId === id) state.dedupeFocusId = null;
   logAudit(`Fiche supprimée (doublon) : ${record.name}.`);
   saveCrmData();
   render();
-  notify("Fiche supprimée");
+  notify("Fiche supprimée", false, { label: "Annuler", run: undo });
 }
 
 // "Nom séparé" : ce ne sont pas de vrais doublons (ex : un couple qui partage
@@ -3977,17 +4093,16 @@ function separateDuplicateRecord(groupKey, id) {
   openModal("editRecord");
 }
 
+// Export brut d'une liste (colonnes = champs de la première ligne). Les
+// contacts et paiements passent par exportTable (app-tools.js), qui met des
+// en-têtes lisibles et propose le format Excel.
 function downloadCsv(filename, rows) {
-  const clean = rows.map(r => { const c = { ...r }; delete c._backendId; delete c._createdAt; delete c._updatedAt; return c; });
-  const list = clean.length ? clean : [{}];
-  const headers = Object.keys(list[0]);
-  const csv = [headers.join(","), ...list.map(row => headers.map(h => csvCell(Array.isArray(row[h]) ? row[h].join("; ") : row[h])).join(","))].join("\n");
-  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  const clean = rows.map(r => { const c = (r && typeof r === "object") ? { ...r } : { valeur: r }; delete c._backendId; delete c._createdAt; delete c._updatedAt; return c; });
+  if (!clean.length) return notify("Rien à exporter");
+  const headers = [...new Set(clean.flatMap(row => Object.keys(row)))];
+  const cell = v => Array.isArray(v) ? v.map(x => (x && typeof x === "object") ? JSON.stringify(x) : x).join(", ") : (v && typeof v === "object") ? JSON.stringify(v) : v;
+  const csv = [headers.map(csvCell).join(";"), ...clean.map(row => headers.map(h => csvCell(cell(row[h]))).join(";"))].join("\r\n");
+  triggerDownload(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), filename);
   notify(`${filename} téléchargé`);
 }
 function csvCell(value) {
@@ -4004,8 +4119,9 @@ function openImportModal() {
   if (d.open) d.close();
   d.className = "";
   dialogContent().innerHTML = `<div class="modal">
-    <header><div><span class="eyebrow">Import</span><h2>Importer un fichier de contacts</h2></div><button class="icon-btn" type="button" data-modal-close title="Fermer">✕</button></header>
+    <header><div><span class="eyebrow">Import</span><h2>Importer un fichier</h2></div><button class="icon-btn" type="button" data-modal-close title="Fermer">${icon("x")}</button></header>
     <div class="form-grid">
+      <p class="span-2 form-note">Contacts ou paiements, au format CSV ou Excel. Le type est reconnu d'après les colonnes : un fichier avec une colonne <strong>Montant</strong> est importé comme une liste de paiements, rattachés aux fiches par email (ou par nom).</p>
       <label class="span-2">Fichier CSV ou Excel (.xlsx)
         <input type="file" id="importFile" accept=".csv,.xlsx,.xls" />
       </label>
@@ -4030,12 +4146,24 @@ async function handleImportFile(event) {
     const rows = await parseImportFile(file);
     pendingImport = analyzeImportRows(rows, file.name);
     preview.innerHTML = importPreviewHtml(pendingImport);
-    confirmBtn.disabled = false;
+    confirmBtn.disabled = pendingImport.kind === "payments" ? !pendingImport.prepared.length : !pendingImport.rows;
+    confirmBtn.textContent = pendingImport.kind === "payments" ? `Importer ${pendingImport.prepared.length} paiement(s)` : `Importer ${pendingImport.rows} ligne(s)`;
   } catch (err) {
     preview.innerHTML = `<p>Impossible de lire ce fichier (${escapeHtml(String(err.message || err))}). Vérifiez le format (.csv ou .xlsx).</p>`;
   }
 }
 
+// Une date lue dans Excel arrive comme un objet Date : on la remet au format
+// JJ/MM/AAAA attendu partout ailleurs (avant, elle arrivait comme un numéro
+// de série Excel du type 45231, inutilisable comme date de naissance).
+function importCellValue(v) {
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    const d = new Date(v.getTime() + 2 * 3600 * 1000);
+    const pad = n => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+  }
+  return v;
+}
 function parseImportFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -4047,46 +4175,76 @@ function parseImportFile(file) {
     } else {
       reader.onload = () => {
         if (!window.XLSX) return reject(new Error("bibliothèque Excel indisponible (pas de connexion internet ?)"));
-        const wb = window.XLSX.read(reader.result, { type: "array" });
+        const wb = window.XLSX.read(reader.result, { type: "array", cellDates: true });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const rows = window.XLSX.utils.sheet_to_json(sheet, { defval: "" });
-        resolve(rows);
+        resolve(rows.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, importCellValue(v)]))));
       };
       reader.readAsArrayBuffer(file);
     }
   });
 }
 
+// Lecture d'un CSV : séparateur ";" ou "," (détecté sur la ligne d'en-tête),
+// guillemets, et retours à la ligne à l'intérieur d'une cellule entre
+// guillemets (une adresse ou un commentaire sur deux lignes ne coupe plus la
+// ligne en deux).
 function parseCsv(text) {
   const clean = text.replace(/^﻿/, "");
-  const lines = clean.split(/\r\n|\n/).filter(l => l.length);
-  if (!lines.length) return [];
-  const splitLine = (line) => {
-    const cells = []; let cur = ""; let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      if (inQuotes) {
-        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
-        else if (c === '"') inQuotes = false;
-        else cur += c;
-      } else if (c === '"') inQuotes = true;
-      else if (c === "," || c === ";") { cells.push(cur); cur = ""; }
+  const firstLine = clean.split(/\r\n|\n/, 1)[0] || "";
+  const sep = (firstLine.match(/;/g) || []).length >= (firstLine.match(/,/g) || []).length ? ";" : ",";
+  const table = [];
+  let row = [], cur = "", inQuotes = false;
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i];
+    if (inQuotes) {
+      if (c === '"' && clean[i + 1] === '"') { cur += '"'; i++; }
+      else if (c === '"') inQuotes = false;
       else cur += c;
-    }
-    cells.push(cur);
-    return cells;
-  };
-  const headers = splitLine(lines[0]);
-  return lines.slice(1).map(line => {
-    const cells = splitLine(line);
-    const row = {};
-    headers.forEach((h, i) => { row[h] = cells[i] ?? ""; });
-    return row;
+    } else if (c === '"') inQuotes = true;
+    else if (c === sep) { row.push(cur); cur = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && clean[i + 1] === "\n") i++;
+      row.push(cur); cur = "";
+      if (row.some(cell => cell !== "")) table.push(row);
+      row = [];
+    } else cur += c;
+  }
+  row.push(cur);
+  if (row.some(cell => cell !== "")) table.push(row);
+  if (!table.length) return [];
+  const headers = table[0].map(h => h.trim());
+  return table.slice(1).map(cells => {
+    const line = {};
+    headers.forEach((h, i) => { line[h] = (cells[i] ?? "").trim(); });
+    return line;
   });
 }
 
+// Colonnes reconnues pour un fichier de paiements.
+const PAYMENT_IMPORT_MAP = {
+  "montant": "amount", "montant (€)": "amount", "montant total": "amount", "amount": "amount",
+  "date": "date", "date du paiement": "date", "date de paiement": "date", "date du don": "date",
+  "email": "email", "payeur": "payer", "donateur": "payer", "nom complet": "payer", "nom": "last", "prenom": "first",
+  "type": "type", "statut": "status", "moyen": "method", "moyen de paiement": "method", "mode de paiement": "method",
+  "occasion": "occasion", "campagne": "occasion", "occasion / campagne": "occasion",
+  "identifiant fiche": "recordId", "n° de recu": "receiptNumber", "numero de recu": "receiptNumber", "note": "note",
+};
+function importDateIso(value) {
+  const v = String(value || "").trim();
+  return parseDob(v) || "";
+}
+function importAmount(value) {
+  if (typeof value === "number") return value;
+  const cleaned = String(value || "").replace(/\s|€/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(",", ".");
+  return Number(cleaned.replace(/[^0-9.-]/g, "")) || 0;
+}
 function analyzeImportRows(rows, fileName) {
   const headers = rows.length ? Object.keys(rows[0]) : [];
+  const isPayments = headers.some(h => PAYMENT_IMPORT_MAP[normalizeHeader(h)] === "amount");
+  return isPayments ? analyzePaymentImport(rows, fileName, headers) : analyzeContactImport(rows, fileName, headers);
+}
+function analyzeContactImport(rows, fileName, headers) {
   const mappedHeaders = headers.filter(h => IMPORT_FIELD_MAP[normalizeHeader(h)]);
   const unmapped = headers.filter(h => !IMPORT_FIELD_MAP[normalizeHeader(h)]);
   const existingByEmail = {};
@@ -4098,7 +4256,7 @@ function analyzeImportRows(rows, fileName) {
       const field = IMPORT_FIELD_MAP[normalizeHeader(header)];
       if (!field) return;
       if (IMPORT_LIST_FIELDS.has(field)) mapped[field] = splitTags(value);
-      else if (IMPORT_NUMBER_FIELDS.has(field)) mapped[field] = Number(String(value).replace(",", ".").replace(/[^0-9.-]/g, "")) || 0;
+      else if (IMPORT_NUMBER_FIELDS.has(field)) mapped[field] = importAmount(value);
       else mapped[field] = String(value ?? "").trim();
     });
     mapped.name = `${mapped.first || ""} ${mapped.last || ""}`.trim() || mapped.name || "Sans nom";
@@ -4107,39 +4265,96 @@ function analyzeImportRows(rows, fileName) {
     if (match) updated += 1; else created += 1;
     return { mapped, match };
   });
-  return { fileName, rows: rows.length, mappedHeaders: mappedHeaders.length, unmapped, created, updated, missingEmail, preparedRecords };
+  return { kind: "contacts", fileName, rows: rows.length, mappedHeaders: mappedHeaders.length, unmapped, created, updated, missingEmail, preparedRecords };
+}
+function analyzePaymentImport(rows, fileName, headers) {
+  const mappedHeaders = headers.filter(h => PAYMENT_IMPORT_MAP[normalizeHeader(h)]);
+  const unmapped = headers.filter(h => !PAYMENT_IMPORT_MAP[normalizeHeader(h)]);
+  const byEmail = new Map(), byName = new Map(), byId = new Map(records.map(r => [r.id, r]));
+  records.forEach(r => {
+    if (r.email) byEmail.set(r.email.toLowerCase().trim(), r);
+    const key = normalizeSearchText(r.name).trim();
+    if (key) byName.set(key, byName.has(key) ? null : r); // null = homonymes : on ne devine pas
+  });
+  const existingKeys = new Set(payments.map(p => `${p.recordId}|${Number(p.amount || 0)}|${paymentIso(p)}`));
+  let matched = 0, newContacts = 0, rejected = 0, duplicates = 0, total = 0;
+  const prepared = [];
+  rows.forEach(row => {
+    const m = {};
+    Object.entries(row).forEach(([header, value]) => { const f = PAYMENT_IMPORT_MAP[normalizeHeader(header)]; if (f && m[f] === undefined) m[f] = value; });
+    const amount = importAmount(m.amount);
+    const name = String(m.payer || `${m.first || ""} ${m.last || ""}`).replace(/\s+/g, " ").trim();
+    const email = String(m.email || "").trim();
+    if (!(amount > 0) || (!name && !email && !m.recordId)) { rejected += 1; return; }
+    const record = byId.get(String(m.recordId || "")) || (email && byEmail.get(email.toLowerCase())) || byName.get(normalizeSearchText(name).trim()) || null;
+    const iso = importDateIso(m.date) || todayIso();
+    if (record && existingKeys.has(`${record.id}|${amount}|${iso}`)) { duplicates += 1; return; }
+    if (record) matched += 1; else newContacts += 1;
+    total += amount;
+    prepared.push({ record, name: name || email, email, amount, iso, type: String(m.type || "").trim() || "Don", status: String(m.status || "").trim() || "Reçu", method: String(m.method || "").trim() || "Virement", occasion: splitTags(m.occasion), receiptNumber: String(m.receiptNumber || "").trim(), note: String(m.note || "").trim() });
+  });
+  return { kind: "payments", fileName, rows: rows.length, mappedHeaders: mappedHeaders.length, unmapped, matched, newContacts, rejected, duplicates, total, prepared };
 }
 
 function importPreviewHtml(p) {
-  return `<div class="metric-grid">
-    ${metric("Lignes lues", p.rows, "")}
-    ${metric("Colonnes reconnues", `${p.mappedHeaders}/${p.mappedHeaders + p.unmapped.length}`, "")}
-    ${metric("Nouvelles fiches", p.created, "")}
-    ${metric("Fiches mises à jour", p.updated, "par email identique")}
+  const notes = `${p.unmapped.length ? `<p class="form-note">Colonnes non reconnues (ignorées) : ${p.unmapped.map(escapeHtml).join(", ")}</p>` : ""}`;
+  if (p.kind === "payments") return `<div class="metric-grid">
+    ${metric("Paiements à importer", p.prepared.length.toLocaleString("fr-FR"), euro(p.total))}
+    ${metric("Rattachés à une fiche", p.matched.toLocaleString("fr-FR"), "par email ou nom")}
+    ${metric("Nouvelles fiches", p.newContacts.toLocaleString("fr-FR"), "payeur inconnu du CRM")}
+    ${metric("Ignorés", (p.duplicates + p.rejected).toLocaleString("fr-FR"), `${p.duplicates} déjà présent(s), ${p.rejected} sans montant ou sans nom`)}
   </div>
-  ${p.missingEmail ? `<p class="muted-note">${p.missingEmail} ligne(s) sans email — importées quand même, à compléter ensuite.</p>` : ""}
-  ${p.unmapped.length ? `<p class="muted-note">Colonnes non reconnues (ignorées) : ${p.unmapped.map(escapeHtml).join(", ")}</p>` : ""}`;
+  <p class="form-note">Les paiements importés sont marqués « Non éligible » au reçu fiscal (sauf numéro de reçu fourni) : aucun reçu n'est émis automatiquement pour un historique.</p>${notes}`;
+  return `<div class="metric-grid">
+    ${metric("Lignes lues", p.rows.toLocaleString("fr-FR"), "")}
+    ${metric("Colonnes reconnues", `${p.mappedHeaders}/${p.mappedHeaders + p.unmapped.length}`, "")}
+    ${metric("Nouvelles fiches", p.created.toLocaleString("fr-FR"), "")}
+    ${metric("Fiches mises à jour", p.updated.toLocaleString("fr-FR"), "par email identique")}
+  </div>
+  ${p.missingEmail ? `<p class="form-note">${p.missingEmail} ligne(s) sans email — importées quand même, à compléter ensuite.</p>` : ""}${notes}`;
 }
 
 function confirmImport() {
   if (!pendingImport) return;
   const p = pendingImport;
-  p.preparedRecords.forEach(({ mapped, match }) => {
-    if (match) {
-      Object.entries(mapped).forEach(([k, v]) => { if (v !== "" && !(Array.isArray(v) && !v.length)) match[k] = v; });
-    } else {
-      const imported = { id: nextId("C", records), kind: "Contact", source: `Import ${p.fileName}`, dateAdded: todayStr(), ...mapped };
-      ensureInAccountScope(imported);
-      records.push(imported);
-    }
-  });
-  imports.unshift({ status: "Terminé", date: todayStr(), file: p.fileName, user: currentUserLabel(), type: "Contacts", rows: p.rows, errors: 0, created: p.created, updated: p.updated, duplicates: p.updated, rejected: 0 });
-  logAudit(`Import de ${p.fileName} : ${p.created} créé(s), ${p.updated} mis à jour.`);
+  if (p.kind === "payments") {
+    const createdByKey = new Map();
+    p.prepared.forEach(row => {
+      let record = row.record;
+      if (!record) {
+        const key = (row.email || row.name).toLowerCase();
+        record = createdByKey.get(key);
+        if (!record) {
+          const idx = row.name.lastIndexOf(" ");
+          record = { id: nextId("C", records), kind: "Contact", first: idx > -1 ? row.name.slice(0, idx) : "", last: idx > -1 ? row.name.slice(idx + 1) : row.name, name: row.name, email: row.email, phone: "", tags: [], groups: [], segments: [], importedAmount: 0, importedPaymentsCount: 0, importedInteractionsCount: 0, source: `Import ${p.fileName}`, dateAdded: todayStr() };
+          ensureInAccountScope(record);
+          records.push(record);
+          createdByKey.set(key, record);
+        }
+      }
+      const [y, mo, d] = row.iso.split("-");
+      payments.push({ id: nextId("PAY-SIN", payments), recordId: record.id, date: `${d}/${mo}/${y}`, at: `${row.iso}T12:00:00.000Z`, payer: record.name, email: record.email || row.email, amount: row.amount, type: row.type, status: row.status, method: row.method, occasion: row.occasion, receipt: row.receiptNumber ? "Généré ailleurs" : "Non éligible", ...(row.receiptNumber ? { receiptNumber: row.receiptNumber } : {}), promiseDate: row.iso, paymentDate: row.status === "Reçu" ? row.iso : "", installmentPlan: false, installments: [], note: row.note, source: `Import ${p.fileName}` });
+    });
+    imports.unshift({ id: nextId("IMP", imports), status: "Terminé", date: todayStr(), file: p.fileName, user: currentUserLabel(), type: "Paiements", rows: p.rows, errors: p.rejected, created: p.prepared.length, updated: 0, duplicates: p.duplicates, rejected: p.rejected });
+    logAudit(`Import de ${p.fileName} : ${p.prepared.length} paiement(s) pour ${euro(p.total)}, ${p.newContacts} fiche(s) créée(s).`);
+  } else {
+    p.preparedRecords.forEach(({ mapped, match }) => {
+      if (match) {
+        Object.entries(mapped).forEach(([k, v]) => { if (v !== "" && !(Array.isArray(v) && !v.length)) match[k] = v; });
+        match.dateModified = todayStr();
+      } else {
+        const imported = { id: nextId("C", records), kind: "Contact", source: `Import ${p.fileName}`, dateAdded: todayStr(), ...mapped };
+        ensureInAccountScope(imported);
+        records.push(imported);
+      }
+    });
+    imports.unshift({ id: nextId("IMP", imports), status: "Terminé", date: todayStr(), file: p.fileName, user: currentUserLabel(), type: "Contacts", rows: p.rows, errors: 0, created: p.created, updated: p.updated, duplicates: p.updated, rejected: 0 });
+    logAudit(`Import de ${p.fileName} : ${p.created} créé(s), ${p.updated} mis à jour.`);
+  }
   pendingImport = null;
   dialog().close();
-  saveCrmData();
-  navigate("imports", "IMPORTS");
-  notify("Import terminé");
+  navigate("imports", "Imports");
+  saveCrmData().then(outcome => { if (outcome === "ok") notify("Import terminé"); });
 }
 
 /* ---------- 12. Démarrage ------------------------------------------------ */
@@ -4168,8 +4383,8 @@ function handleUnauthorized() {
 
 function renderSetupScreen(error) {
   authScreenEl().innerHTML = `<div class="auth-card">
-    <img class="auth-logo" src="./assets/logo-sinai.png" alt="">
-    <h1>Bienvenue sur CRM Sinaï</h1>
+    <img class="auth-logo" src="./assets/logo-sinai.png" alt="Les Institutions Sinaï">
+    <h1>Bienvenue sur le CRM Sinaï</h1>
     <p class="auth-subtitle">Première connexion : créez le compte administrateur.</p>
     ${error ? `<div class="auth-error">${escapeHtml(error)}</div>` : ""}
     <form class="auth-form" id="setupForm">
@@ -4197,9 +4412,9 @@ function renderSetupScreen(error) {
 
 function renderLoginScreen(error) {
   authScreenEl().innerHTML = `<div class="auth-card">
-    <img class="auth-logo" src="./assets/logo-sinai.png" alt="">
-    <h1>CRM Sinaï</h1>
-    <p class="auth-subtitle">Connectez-vous pour accéder à votre espace.</p>
+    <img class="auth-logo" src="./assets/logo-sinai.png" alt="Les Institutions Sinaï">
+    <h1>Bon retour</h1>
+    <p class="auth-subtitle">Connectez-vous pour accéder au CRM Sinaï.</p>
     ${error ? `<div class="auth-error">${escapeHtml(error)}</div>` : ""}
     <form class="auth-form" id="loginForm">
       <label>Email<input name="email" type="email" required autocomplete="username"></label>
@@ -4224,9 +4439,8 @@ function updateProfileCard() {
   const card = document.querySelector("#profileCard");
   if (!card || !currentAccount) return;
   const name = `${currentAccount.first || ""} ${currentAccount.last || ""}`.trim() || currentAccount.email;
-  const scopeNote = currentAccount.scopeMode === "tags" ? "Accès restreint par catégorie" : "Accès à tous les contacts";
   document.body.classList.toggle("read-only", isReadOnlyAccount());
-  card.innerHTML = `<span class="eyebrow">${escapeHtml(currentAccount.profile)}</span><strong>${escapeHtml(name)}</strong><p>${escapeHtml(currentAccount.email)} · ${escapeHtml(scopeNote)}</p>`;
+  card.innerHTML = `${avatar({ name, kind: "Contact" }, "sm")}<span class="account-text"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(currentAccount.profile)}${currentAccount.scopeMode === "tags" ? " · accès restreint" : ""}</span></span>${icon("chevrons", 14)}`;
 }
 
 async function boot() {
@@ -4253,60 +4467,97 @@ async function boot() {
   bootApp();
 }
 
-// fromServer : la version serveur fait foi, même vide (utilisé après un
-// refus d'enregistrement pour effacer les fiches "fantômes" locales).
+// fromServer : la version reçue fait foi, même vide (utilisé au chargement
+// et après un refus d'enregistrement, pour effacer les fiches "fantômes").
+// Les trois listes de réglages qui ont une valeur par défaut la gardent tant
+// que le serveur n'en a pas enregistré une.
 function applyCrmData(data, fromServer = false) {
-  records = Array.isArray(data.records) && (data.records.length || fromServer) ? data.records : records;
-  payments = Array.isArray(data.payments) ? data.payments : payments;
-  imports = Array.isArray(data.imports) && data.imports.length ? data.imports : imports;
-  users = Array.isArray(data.users) && data.users.length ? data.users : users;
-  groups = Array.isArray(data.groups) ? data.groups : groups;
-  interactions = Array.isArray(data.interactions) ? data.interactions : interactions;
-  linkages = Array.isArray(data.linkages) ? data.linkages : linkages;
-  customFields = Array.isArray(data.customFields) && data.customFields.length ? data.customFields : customFields;
-  receiptTemplates = Array.isArray(data.receiptTemplates) && data.receiptTemplates.length ? data.receiptTemplates : receiptTemplates;
-  savedViews = Array.isArray(data.savedViews) ? data.savedViews : savedViews;
-  auditLog = Array.isArray(data.auditLog) ? data.auditLog : auditLog;
-  interactionCategories = Array.isArray(data.interactionCategories) && data.interactionCategories.length ? data.interactionCategories : interactionCategories;
-  tasks = Array.isArray(data.tasks) ? data.tasks : tasks;
+  const take = (key, current, needsContent = false) => {
+    const value = data[key];
+    if (!Array.isArray(value)) return current;
+    if (needsContent && !value.length) return current;
+    return value;
+  };
+  records = take("records", records, !fromServer);
+  payments = take("payments", payments);
+  imports = take("imports", imports);
+  users = take("users", users);
+  groups = take("groups", groups);
+  interactions = take("interactions", interactions);
+  linkages = take("linkages", linkages);
+  customFields = take("customFields", customFields, true);
+  receiptTemplates = take("receiptTemplates", receiptTemplates, true);
+  savedViews = take("savedViews", savedViews);
+  auditLog = take("auditLog", auditLog);
+  interactionCategories = take("interactionCategories", interactionCategories, true);
+  tasks = take("tasks", tasks);
+  campaigns = take("campaigns", campaigns);
   holidayNotes = (data.holidayNotes && typeof data.holidayNotes === "object") ? data.holidayNotes : holidayNotes;
-  receiptLog = Array.isArray(data.receiptLog) ? data.receiptLog : receiptLog;
-  dismissedDuplicates = Array.isArray(data.dismissedDuplicates) ? data.dismissedDuplicates : dismissedDuplicates;
-  if (data.state?.selectedRecord && records.some(r => r.id === data.state.selectedRecord)) {
-    state.selectedRecord = data.state.selectedRecord;
-  }
+  receiptLog = take("receiptLog", receiptLog);
+  dismissedDuplicates = take("dismissedDuplicates", dismissedDuplicates);
+}
+
+// Remise en forme des données chargées, sans rien changer à leur sens : un
+// identifiant pour les éléments qui n'en avaient pas (liaisons, groupes,
+// lignes du journal comptable...), nécessaire pour les modifier un par un.
+// Volontairement minimal : chaque élément modifié ici est renvoyé au serveur
+// au prochain enregistrement.
+function normalizeLoadedData() {
+  const giveIds = (list, prefix) => {
+    const seen = new Set();
+    list.forEach(item => {
+      if (!item || typeof item !== "object") return;
+      if (!item.id || seen.has(String(item.id))) item.id = `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+      seen.add(String(item.id));
+    });
+  };
+  giveIds(linkages, "LNK");
+  giveIds(groups, "GRP");
+  giveIds(imports, "IMP");
+  giveIds(receiptLog, "RCL");
+  giveIds(campaigns, "CAMP");
+  giveIds(auditLog, "AUD");
+  giveIds(tasks, "T");
+  giveIds(savedViews, "SEG");
+  records.forEach(r => { ["tags", "segments", "groups"].forEach(k => { if (r[k] && !Array.isArray(r[k])) r[k] = splitTags(r[k]); }); });
+  payments.forEach(p => { if (p.occasion && !Array.isArray(p.occasion)) p.occasion = splitTags(p.occasion); });
 }
 
 async function bootApp() {
   updateProfileCard();
   await refreshAccounts();
   seedFromImportedContacts();
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* ancienne copie locale, remplacée par IndexedDB */ }
+  await flushPendingSync();
   const server = await apiGetState();
-  const backup = server || loadLocalBackup();
-  if (backup) applyCrmData(backup);
-  if (!state.selectedRecord && records.length) state.selectedRecord = records[0].id;
+  if (server) {
+    applyServerState(server);
+  } else {
+    // Serveur injoignable : on affiche la dernière copie gardée sur cet
+    // appareil, avec les modifications qui attendaient d'être envoyées.
+    const backup = await idbGet("state");
+    if (backup && backup.accountId === currentAccount.id && backup.data) {
+      syncSnapshot = snapshotOf(backup.data);
+      syncRev = Number(backup.data.rev || 0);
+      applyCrmData(backup.data, true);
+      normalizeLoadedData();
+      const pending = await idbGet("pending");
+      if (pending && pending.accountId === currentAccount.id && pending.payload) applyPayloadLocally(pending.payload);
+    }
+  }
   // Pose déjà un rappel dès qu'une fête approche (pas besoin de cliquer un
   // bouton pour y penser) : voir ensureHolidayReminders plus haut.
-  if (ensureHolidayReminders() && !isReadOnlyAccount()) saveCrmData();
+  if (syncSnapshot && !isReadOnlyAccount() && ensureHolidayReminders()) saveCrmData({ silent: true });
+  applyHash();
   state.booted = true;
   render();
   document.body.classList.remove("booting");
-  if (!server) setSaveIndicator("Mode hors ligne — dernières données locales", "warn");
+  if (!server) setSaveIndicator(syncSnapshot ? "Mode hors ligne — dernières données de cet appareil" : "Serveur injoignable", "warn");
   // Rappels de tâches : vraies notifications push envoyées par le serveur
-  // (voir Réglages) — on resynchronise juste l'état d'abonnement de cet
-  // appareil (abonné ou non, heure choisie) pour que le panneau Réglages
-  // reflète la réalité, y compris après une connexion sur un nouvel appareil.
-  refreshPushState().then(() => render());
+  // (voir Paramètres > Mon compte) — on resynchronise juste l'état
+  // d'abonnement de cet appareil pour que le réglage reflète la réalité.
+  refreshPushState().then(() => { if (state.view === "settings" && !userIsTyping()) render(); });
 }
-
-document.querySelector("#newRecordBtn").addEventListener("click", toggleFabMenu);
-document.querySelector("#fabAdd").addEventListener("click", toggleFabMenu);
-buildFabMenu();
-document.querySelector("#dupBtn").addEventListener("click", () => handleAction("dedupe"));
-document.querySelector("#importBtn").addEventListener("click", () => handleAction("import-new"));
-document.querySelector("#exportBtn").addEventListener("click", () => handleAction("export-current"));
-document.querySelector("#navToggle").addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
-document.querySelector("#navScrim").addEventListener("click", closeNav);
 
 // Thème clair/sombre : persisté dans localStorage, appliqué via l'attribut
 // data-theme sur <html> (voir le script "anti-flash" dans index.html qui
@@ -4320,37 +4571,8 @@ function getEffectiveTheme() {
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* stockage indisponible */ }
-  const btn = document.querySelector("#themeToggle");
-  const label = document.querySelector("#themeToggleLabel");
-  if (btn) btn.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
-  if (label) label.textContent = theme === "dark" ? "Mode clair" : "Mode sombre";
-}
-applyTheme(getEffectiveTheme());
-document.querySelector("#themeToggle")?.addEventListener("click", () => {
-  applyTheme(getEffectiveTheme() === "dark" ? "light" : "dark");
-});
-
-// Doublons du haut, repris dans le tiroir de menu mobile (le bandeau de
-// boutons du haut est masqué en dessous de 720px pour dégager l'écran).
-document.querySelector("#dupBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("dedupe"); });
-document.querySelector("#importBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("import-new"); });
-document.querySelector("#exportBtnMobile")?.addEventListener("click", () => { closeNav(); handleAction("export-current"); });
-
-// Barre de navigation mobile (bas d'écran).
-document.querySelector("#bnavHome")?.addEventListener("click", () => { closeNav(); navigate("home", "Accueil"); });
-document.querySelector("#bnavContacts")?.addEventListener("click", () => { closeNav(); navigate("crm", "Contacts"); });
-document.querySelector("#bnavPayments")?.addEventListener("click", () => { closeNav(); navigate("pay", "Tous les paiements"); });
-document.querySelector("#bnavInteractions")?.addEventListener("click", () => { closeNav(); navigate("crm", "Interactions"); });
-document.querySelector("#bnavMenu")?.addEventListener("click", () => (state.navOpen ? closeNav() : openNav()));
-
-document.querySelector("#logoutBtn")?.addEventListener("click", async () => {
-  await apiLogout();
-  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch { /* stockage indisponible */ }
-  location.reload();
-});
-
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  window.addEventListener("load", () => navigator.serviceWorker.register("./service-worker.js").catch(() => {}));
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#0b0b0f" : "#f4f4f6");
 }
 
-boot();
+// Le démarrage (boot) et les écouteurs globaux sont à la fin de app-tools.js,
+// chargé en dernier.

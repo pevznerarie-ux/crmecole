@@ -71,7 +71,56 @@ COLLECTIONS = {
     "interactionCategories",
     "receiptLog",
     "dismissedDuplicates",
+    # Campagnes de collecte (objectif + période) : les dons y sont rattachés
+    # par leur "occasion", qui porte le nom de la campagne.
+    "campaigns",
 }
+
+# Fichiers statiques que le serveur accepte de servir. Tout le reste du
+# dossier (server.py, la base crm.sqlite quand elle vit à côté du code,
+# crm-state.json, .git, la signature utilisée pour les reçus...) renvoie 404 :
+# avant, SimpleHTTPRequestHandler servait le dossier entier, donc la base
+# complète (contacts, dons, mots de passe hachés) pouvait être téléchargée
+# sans connexion dès que DATA_DIR n'était pas un volume séparé.
+STATIC_FILES = {
+    "index.html", "styles.css", "app.js", "app-views.js", "app-tools.js",
+    "manifest.json", "service-worker.js", "sample-contacts.js",
+}
+STATIC_ASSET_EXT = {"png", "jpg", "jpeg", "svg", "webp", "ico"}
+
+
+def static_allowed(path):
+    rel = unquote(path).lstrip("/") or "index.html"
+    if rel in STATIC_FILES:
+        return True
+    if rel.startswith("assets/") and ".." not in rel and not rel.startswith("assets/signatures/"):
+        return rel.rsplit(".", 1)[-1].lower() in STATIC_ASSET_EXT
+    return False
+
+
+# Un seul écrivain à la fois sur les données du CRM : garantit que le numéro
+# de révision et les modifications d'une synchronisation forment un tout.
+WRITE_LOCK = threading.RLock()
+
+# Collections qu'un compte à accès restreint a le droit de modifier.
+SCOPED_SYNC_COLLECTIONS = {"records", "payments", "interactions", "auditLog", "tasks"}
+
+# Tentatives de connexion : 10 essais ratés par tranche de 10 minutes, par
+# couple (adresse IP, email), pour freiner un essai de mots de passe en série.
+LOGIN_WINDOW_SECONDS = 600
+LOGIN_MAX_FAILURES = 10
+_login_failures = {}
+
+
+def login_blocked(key):
+    now = time.time()
+    recent = [t for t in _login_failures.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+    _login_failures[key] = recent
+    return len(recent) >= LOGIN_MAX_FAILURES
+
+
+def login_failed(key):
+    _login_failures.setdefault(key, []).append(time.time())
 
 
 def now_iso():
@@ -464,6 +513,8 @@ def create_account(email, password, first="", last="", profile="Lecture seule", 
     email = (email or "").strip().lower()
     if not email or not password:
         raise ValueError("Email et mot de passe requis")
+    if len(password) < 8:
+        raise ValueError("Le mot de passe doit contenir au moins 8 caractères")
     if profile not in PROFILES:
         profile = "Lecture seule"
     digest, salt = hash_password(password)
@@ -676,6 +727,8 @@ def init_db():
             except Exception:
                 pass
         migrate_merge_duplicate_tags(db)
+        normalize_item_keys(db)
+        db.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
 
 
 def item_key(collection, item, position=0):
@@ -696,9 +749,12 @@ def state_from_db():
     with connect() as db:
         count = db.execute("SELECT COUNT(*) FROM collection_items").fetchone()[0]
         if count == 0:
-            return {}
+            data = empty_state()
+            data["rev"] = current_rev(db)
+            return data
         state = {
             "version": 1,
+            "rev": current_rev(db),
             "savedAt": get_meta(db, "savedAt") or now_iso(),
             "state": json.loads(get_meta(db, "uiState") or "{}"),
             "holidayNotes": json.loads(get_meta(db, "holidayNotes") or "{}"),
@@ -787,6 +843,244 @@ def write_state_to_db(db, data, merge_collections=None):
             )
 
 
+def current_rev(db):
+    return int(get_meta(db, "rev") or 0)
+
+
+def bump_rev(db):
+    """Numéro de révision des données, augmenté à chaque écriture : le
+    navigateur le compare au sien pour savoir si quelqu'un d'autre a modifié
+    le CRM entre-temps (et recharger), sans retélécharger toutes les données."""
+    rev = current_rev(db) + 1
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('rev', ?)", (str(rev),))
+    return rev
+
+
+def record_in_scope(record, allowed):
+    if not isinstance(record, dict):
+        return False
+    if record.get("kind") == "Structure":
+        return True
+    labels = {str(t).lower() for t in ((record.get("tags") or []) + (record.get("segments") or []) + (record.get("groups") or []))}
+    return bool(labels & allowed)
+
+
+def apply_sync(db, account, body):
+    """Synchronisation fiche par fiche : le navigateur n'envoie que ce qu'il a
+    créé, modifié ou supprimé depuis son dernier chargement. Deux personnes
+    qui travaillent en même temps ne s'écrasent donc plus leurs données (avant,
+    chaque enregistrement renvoyait TOUT le CRM et remplaçait la base entière :
+    le dernier à enregistrer effaçait ce que l'autre venait de saisir)."""
+    changes = body.get("changes") or {}
+    replace = body.get("replace") or {}
+    meta = body.get("meta") or {}
+    scoped = account["scope_mode"] == "tags"
+    denied = []
+    applied = 0
+    now = now_iso()
+    allowed, visible = set(), set()
+    if scoped:
+        allowed = {str(t).lower() for t in json.loads(account["scope_tags"] or "[]")}
+        for row in db.execute("SELECT item_id, payload FROM collection_items WHERE collection = 'records'").fetchall():
+            try:
+                if record_in_scope(json.loads(row["payload"]), allowed):
+                    visible.add(row["item_id"])
+            except Exception:
+                continue
+
+    def payload_of(collection, key):
+        row = db.execute(
+            "SELECT payload FROM collection_items WHERE collection = ? AND item_id = ?", (collection, key)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload"])
+        except Exception:
+            return None
+
+    # Les fiches d'abord : un don créé en même temps que son contact doit
+    # trouver ce contact déjà dans le périmètre visible.
+    for collection in sorted(changes, key=lambda c: 0 if c == "records" else 1):
+        if collection not in COLLECTIONS:
+            continue
+        if scoped and collection not in SCOPED_SYNC_COLLECTIONS:
+            denied.append(collection)
+            continue
+        change = changes.get(collection) or {}
+        upserts = change.get("upsert") or []
+        removes = change.get("remove") or []
+        min_pos = db.execute(
+            "SELECT COALESCE(MIN(position), 0) FROM collection_items WHERE collection = ?", (collection,)
+        ).fetchone()[0]
+        # Parcours à l'envers : le premier élément de la liste reçoit la plus
+        # petite position, donc l'ordre "plus récent en premier" est conservé.
+        for item in reversed(upserts):
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            key = str(item["id"])
+            existing = db.execute(
+                "SELECT position, created_at FROM collection_items WHERE collection = ? AND item_id = ?",
+                (collection, key),
+            ).fetchone()
+            if scoped:
+                if collection == "records":
+                    if not record_in_scope(item, allowed) or (existing and key not in visible):
+                        denied.append(key)
+                        continue
+                    visible.add(key)
+                elif collection in ("payments", "interactions") and item.get("recordId") not in visible:
+                    denied.append(key)
+                    continue
+            if existing:
+                position, created_at = existing["position"], existing["created_at"]
+            else:
+                min_pos -= 1
+                position, created_at = min_pos, now
+            db.execute(
+                """
+                INSERT OR REPLACE INTO collection_items
+                    (collection, item_id, position, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (collection, key, position, json.dumps(item, ensure_ascii=False), created_at, now),
+            )
+            applied += 1
+        for key in removes:
+            key = str(key)
+            if scoped:
+                if collection == "auditLog":
+                    continue
+                if collection == "records" and key not in visible:
+                    denied.append(key)
+                    continue
+                if collection in ("payments", "interactions"):
+                    current = payload_of(collection, key)
+                    if current is not None and current.get("recordId") not in visible:
+                        denied.append(key)
+                        continue
+            cursor = db.execute(
+                "DELETE FROM collection_items WHERE collection = ? AND item_id = ?", (collection, key)
+            )
+            applied += cursor.rowcount
+    if not scoped:
+        # Petites listes de réglages (ou listes sans identifiant par élément) :
+        # remplacées d'un bloc quand elles changent.
+        for collection, items in replace.items():
+            if collection not in COLLECTIONS or not isinstance(items, list):
+                continue
+            db.execute("DELETE FROM collection_items WHERE collection = ?", (collection,))
+            for position, item in enumerate(items):
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO collection_items
+                        (collection, item_id, position, payload, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (collection, item_key(collection, item, position), position,
+                     json.dumps(item, ensure_ascii=False), now, now),
+                )
+            applied += 1
+        if isinstance(meta.get("holidayNotes"), dict):
+            db.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('holidayNotes', ?)",
+                (json.dumps(meta["holidayNotes"], ensure_ascii=False),),
+            )
+            applied += 1
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('savedAt', ?)", (now,))
+    rev = bump_rev(db) if applied else current_rev(db)
+    return {"ok": True, "rev": rev, "applied": applied, "denied": denied}
+
+
+def normalize_item_keys(db):
+    """Une seule fois : aligne la clé de stockage de chaque élément sur son
+    champ "id" quand il en a un. La synchronisation fiche par fiche retrouve
+    les éléments par leur id ; quelques lignes anciennes avaient été rangées
+    sous une autre clé (email, nom...)."""
+    if get_meta(db, "keyNormV1") == "done":
+        return
+    rows = db.execute("SELECT collection, item_id, payload FROM collection_items").fetchall()
+    for row in rows:
+        try:
+            item = json.loads(row["payload"])
+        except Exception:
+            continue
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        key = str(item["id"])
+        if key == row["item_id"]:
+            continue
+        taken = db.execute(
+            "SELECT 1 FROM collection_items WHERE collection = ? AND item_id = ?", (row["collection"], key)
+        ).fetchone()
+        if taken:
+            continue
+        db.execute(
+            "UPDATE collection_items SET item_id = ? WHERE collection = ? AND item_id = ?",
+            (key, row["collection"], row["item_id"]),
+        )
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('keyNormV1', 'done')")
+
+
+def allocate_receipt_numbers(year, count):
+    """Numéros de reçus fiscaux attribués par le serveur, un par un et sans
+    trou ni doublon, même si deux personnes génèrent des reçus au même moment
+    (avant, chaque navigateur calculait le numéro suivant de son côté)."""
+    prefix = f"RF-{year}-"
+    with WRITE_LOCK, connect() as db:
+        highest = int(get_meta(db, f"receiptSeq:{year}") or 0)
+        rows = db.execute(
+            "SELECT payload FROM collection_items WHERE collection = 'payments' AND payload LIKE ?",
+            (f"%{prefix}%",),
+        ).fetchall()
+        for row in rows:
+            try:
+                number = str(json.loads(row["payload"]).get("receiptNumber") or "")
+            except Exception:
+                continue
+            if number.startswith(prefix):
+                try:
+                    highest = max(highest, int(number[len(prefix):]))
+                except ValueError:
+                    continue
+        numbers = [f"{prefix}{highest + i + 1:04d}" for i in range(count)]
+        db.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (f"receiptSeq:{year}", str(highest + count)),
+        )
+    return numbers
+
+
+# Copie JSON de secours : réécrite au plus une fois toutes les 20 secondes
+# (dans un fil à part) au lieu de l'être à chaque enregistrement — avec
+# plusieurs milliers de dons, relire toute la base et réécrire un fichier de
+# plusieurs Mo à chaque clic ralentissait chaque sauvegarde.
+_backup_dirty = threading.Event()
+
+
+def schedule_backup():
+    _backup_dirty.set()
+
+
+def backup_loop():
+    while True:
+        _backup_dirty.wait()
+        time.sleep(20)
+        _backup_dirty.clear()
+        try:
+            with connect() as db:
+                rebuild_state_backup(db, touch_saved_at=False)
+        except Exception as exc:
+            print(f"[backup] Copie JSON de secours impossible : {exc}")
+
+
+def empty_state():
+    data = {"version": 1, "rev": 0, "savedAt": now_iso(), "state": {}, "holidayNotes": {}}
+    for collection in COLLECTIONS:
+        data[collection] = []
+    return data
+
+
 def persist_json_backup(data):
     STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -872,6 +1166,7 @@ def upsert_item(collection, data, item_id=None):
             """,
             (collection, key, position, json.dumps(data, ensure_ascii=False), created_at, updated_at),
         )
+        bump_rev(db)
         rebuild_state_backup(db)
     return get_item(collection, key)
 
@@ -884,18 +1179,20 @@ def delete_item(collection, item_id):
         )
         deleted = cursor.rowcount > 0
         if deleted:
+            bump_rev(db)
             rebuild_state_backup(db)
     return deleted
 
 
-def rebuild_state_backup(db):
+def rebuild_state_backup(db, touch_saved_at=True):
     data = {
         "version": 1,
-        "savedAt": now_iso(),
+        "savedAt": now_iso() if touch_saved_at else (get_meta(db, "savedAt") or now_iso()),
         "state": json.loads(get_meta(db, "uiState") or "{}"),
         "holidayNotes": json.loads(get_meta(db, "holidayNotes") or "{}"),
     }
-    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("savedAt", data["savedAt"]))
+    if touch_saved_at:
+        db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("savedAt", data["savedAt"]))
     for collection in COLLECTIONS:
         rows = db.execute(
             "SELECT payload FROM collection_items WHERE collection = ? ORDER BY position ASC, item_id ASC",
@@ -1180,13 +1477,12 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path == "/api/health":
-            self.send_json({
-                "ok": True,
-                "backend": "sqlite",
-                "database": str(DB_FILE),
-                "jsonBackup": str(STATE_FILE),
-                "collections": api_counts(),
-            })
+            # Volontairement minimal : cette route est publique (sonde Railway),
+            # elle ne doit rien révéler sur la base ni sur son contenu.
+            self.send_json({"ok": True})
+            return
+        if not path.startswith("/api/") and not static_allowed(path):
+            self.send_error_json(404, "Introuvable")
             return
         if path == "/api/auth/status":
             self.send_json({"setupRequired": accounts_count() == 0})
@@ -1223,7 +1519,27 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             data = apply_scope_to_state(data, account)
             self.send_json(data)
             return
+        if path == "/api/rev":
+            with connect() as db:
+                self.send_json({"rev": current_rev(db)})
+            return
+        if path == "/api/backup":
+            # Sauvegarde complète téléchargeable : administrateurs voyant tout.
+            if account["profile"] != "Administrateur" or account["scope_mode"] != "all":
+                self.send_error_json(403, "Réservé aux administrateurs")
+                return
+            payload = json.dumps(state_from_db(), ensure_ascii=False, indent=1).encode("utf-8")
+            stamp = datetime.now(PARIS_TZ).strftime("%Y-%m-%d")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="sauvegarde-crm-sinai-{stamp}.json"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if path == "/api/collections":
+            if not self.require_full_admin(account):
+                return
             self.send_json({"collections": sorted(COLLECTIONS), "counts": api_counts()})
             return
         if path == "/api/push/vapid-public-key":
@@ -1236,6 +1552,8 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             return
         route = self.collection_route(path)
         if route:
+            if not self.require_full_admin(account):
+                return
             collection, item_id = route
             if item_id:
                 item = get_item(collection, item_id)
@@ -1250,6 +1568,23 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
                 })
             return
         super().do_GET()
+
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/") or not static_allowed(path):
+            self.send_response(404)
+            self.end_headers()
+            return
+        super().do_HEAD()
+
+    def require_full_admin(self, account):
+        """Les routes génériques /api/<collection> lisent et écrivent toute la
+        base sans tenir compte du périmètre ni du profil : elles sont donc
+        réservées aux administrateurs qui voient déjà tout."""
+        if account["profile"] != "Administrateur" or account["scope_mode"] != "all":
+            self.send_error_json(403, "Réservé aux administrateurs")
+            return False
+        return True
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -1277,9 +1612,14 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             data = self.read_json()
             email = (data.get("email") or "").strip().lower()
             password = data.get("password") or ""
+            throttle_key = f"{self.client_address[0]}|{email}"
+            if login_blocked(throttle_key):
+                self.send_error_json(429, "Trop de tentatives. Réessayez dans quelques minutes.")
+                return
             with connect() as db:
                 row = db.execute("SELECT * FROM accounts WHERE email = ?", (email,)).fetchone()
             if not row or not verify_password(password, row["password_hash"], row["salt"]):
+                login_failed(throttle_key)
                 self.send_error_json(401, "Email ou mot de passe incorrect")
                 return
             with connect() as db:
@@ -1317,6 +1657,54 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         # Tout le reste de l'API nécessite une session valide.
         account = self.require_account()
         if not account:
+            return
+
+        if path == "/api/auth/password":
+            # Chacun peut changer son propre mot de passe (avant, seul un
+            # administrateur pouvait le faire depuis la gestion des comptes).
+            data = self.read_json()
+            current = data.get("current") or ""
+            new_password = data.get("new") or ""
+            if not verify_password(current, account["password_hash"], account["salt"]):
+                self.send_error_json(400, "Mot de passe actuel incorrect")
+                return
+            if len(new_password) < 8:
+                self.send_error_json(400, "Le nouveau mot de passe doit contenir au moins 8 caractères")
+                return
+            digest, salt = hash_password(new_password)
+            with connect() as db:
+                db.execute("UPDATE accounts SET password_hash = ?, salt = ? WHERE id = ?", (digest, salt, account["id"]))
+                # Les autres appareils connectés avec l'ancien mot de passe sont déconnectés.
+                db.execute("DELETE FROM sessions WHERE account_id = ? AND token != ?", (account["id"], self.bearer_token()))
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/sync":
+            if account["profile"] == "Lecture seule":
+                self.send_error_json(403, "Compte en lecture seule : enregistrement impossible")
+                return
+            body = self.read_json()
+            if body.get("version") != 1:
+                self.send_error_json(400, "Version de synchronisation non supportée")
+                return
+            with WRITE_LOCK, connect() as db:
+                result = apply_sync(db, account, body)
+            schedule_backup()
+            self.send_json(result)
+            return
+
+        if path == "/api/receipt-number":
+            if account["profile"] == "Lecture seule":
+                self.send_error_json(403, "Compte en lecture seule")
+                return
+            data = self.read_json()
+            try:
+                year = int(data.get("year") or datetime.now(PARIS_TZ).year)
+                count = max(1, min(int(data.get("count") or 1), 2000))
+            except (TypeError, ValueError):
+                self.send_error_json(400, "Paramètres invalides")
+                return
+            self.send_json({"numbers": allocate_receipt_numbers(year, count)})
             return
 
         if path == "/api/push/subscribe":
@@ -1367,37 +1755,39 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
             if account["profile"] == "Lecture seule":
                 self.send_error_json(403, "Compte en lecture seule : enregistrement impossible")
                 return
+            # Ancienne route "tout renvoyer, tout remplacer". L'app enregistre
+            # désormais fiche par fiche (/api/sync). Un appareil resté sur une
+            # ancienne version en cache enverrait ici une copie complète et
+            # périmée du CRM, qui effacerait le travail fait entre-temps par
+            # les autres : on la refuse, avec un message qui s'affiche tel
+            # quel dans l'ancienne interface. Seule exception : la
+            # restauration volontaire d'une sauvegarde par un administrateur
+            # (POST /api/state?restore=1 avec le fichier de sauvegarde).
+            restore = (parse_qs(parsed.query).get("restore") or [""])[0] == "1"
+            if not restore:
+                self.send_error_json(
+                    409,
+                    "une nouvelle version du CRM est installée. Fermez puis rouvrez l'application "
+                    "pour continuer (cette dernière modification est à refaire).",
+                )
+                return
+            if not self.require_full_admin(account):
+                return
             data = self.read_json()
             if data.get("version") != 1:
                 self.send_error_json(400, "Version de sauvegarde non supportee")
                 return
-            if account["scope_mode"] == "all":
-                # Cet appareil voit l'intégralité des fiches (aucun filtre côté
-                # lecture) : sa copie locale est donc complète et un remplacement
-                # total est fiable (les suppressions se propagent normalement).
-                with connect() as db:
-                    write_state_to_db(db, data)
-                persist_json_backup(data)
-            else:
-                # Compte à accès restreint : sa copie locale ne contient que son
-                # périmètre. On ne fusionne donc que les collections "de terrain",
-                # uniquement pour les fiches dans son périmètre — jamais de
-                # remplacement total, qui effacerait ce qu'il ne voit pas.
-                scope_tags = json.loads(account["scope_tags"] or "[]")
-                records = data.get("records") or []
-                visible_ids = scope_visible_record_ids(records, scope_tags)
-                data = dict(data)
-                data["records"] = [r for r in records if r.get("id") in visible_ids]
-                data["payments"] = [p for p in (data.get("payments") or []) if p.get("recordId") in visible_ids]
-                data["interactions"] = [i for i in (data.get("interactions") or []) if i.get("recordId") in visible_ids]
-                with connect() as db:
-                    write_state_to_db(db, data, merge_collections={"records", "payments", "interactions", "auditLog", "tasks"})
-                    rebuild_state_backup(db)
+            with WRITE_LOCK, connect() as db:
+                write_state_to_db(db, data)
+                bump_rev(db)
+            persist_json_backup(data)
             self.send_json({"ok": True, "savedAt": data.get("savedAt")})
             return
 
         route = self.collection_route(path)
         if route and not route[1]:
+            if not self.require_full_admin(account):
+                return
             try:
                 item = upsert_item(route[0], self.read_json())
                 self.send_json(item, status=201)
@@ -1413,9 +1803,19 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "accounts":
-            if not self.require_account(admin_only=True):
+            admin = self.require_account(admin_only=True)
+            if not admin:
                 return
             data = self.read_json()
+            if "profile" in data and data["profile"] not in PROFILES:
+                self.send_error_json(400, "Profil inconnu")
+                return
+            if admin["id"] == parts[2] and data.get("profile") not in (None, "Administrateur"):
+                self.send_error_json(400, "Impossible de retirer son propre accès administrateur")
+                return
+            if data.get("password") and len(data["password"]) < 8:
+                self.send_error_json(400, "Le mot de passe doit contenir au moins 8 caractères")
+                return
             fields, values = [], []
             for key, column in (("first", "first"), ("last", "last"), ("profile", "profile")):
                 if key in data:
@@ -1465,7 +1865,8 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "deleted": parts[2]})
             return
-        if not self.require_account():
+        account = self.require_account()
+        if not account or not self.require_full_admin(account):
             return
         route = self.collection_route(parsed.path)
         if not route or not route[1]:
@@ -1478,7 +1879,8 @@ class SinaiCrmHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "deleted": route[1]})
 
     def update_item(self, partial=False):
-        if not self.require_account():
+        account = self.require_account()
+        if not account or not self.require_full_admin(account):
             return
         route = self.collection_route(urlparse(self.path).path)
         if not route or not route[1]:
@@ -1544,6 +1946,7 @@ if __name__ == "__main__":
     server = ThreadingHTTPServer((host, port), SinaiCrmHandler)
     print(f"CRM Sinai backend running at http://{host}:{port}/index.html")
     print(f"SQLite database: {DB_FILE}")
+    threading.Thread(target=backup_loop, daemon=True).start()
     if PUSH_AVAILABLE:
         threading.Thread(target=push_notification_loop, daemon=True).start()
         print("[push] Notifications push activées (boucle de fond démarrée)")
